@@ -108,15 +108,17 @@ async def chat_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'type': 'intent', 'intent': current_intent}, ensure_ascii=False)}\n\n"
 
                 # 捕获 LLM token 流（打字机效果）
-                # 只捕获"回答阶段"的 LLM 调用：qa_agent/analyze_agent/general_agent 节点内的
-                # triage 节点也用 LLM，但其输出（意图标签）不应作为回答 token 推送
+                # 只捕获"最终回答阶段"的 LLM 调用：
+                # - qa/analyze/general: 对应 agent 节点
+                # - synthesize: 只有 assembler 节点是最终输出
+                # 过滤掉 triage（意图分类）、planner（大纲生成）、section_worker（章节写作）
                 if kind == "on_chat_model_stream":
-                    # 通过事件元数据判断是否在 triage 节点内
-                    # langgraph 的 astream_events 会带 tags/metadata 标识当前节点
                     tags = event.get("tags", [])
                     metadata = event.get("metadata", {})
-                    # 过滤掉 triage 节点的 LLM 调用（意图分类不应作为回答）
-                    if "triage" in tags or "triage" in str(metadata.get("langgraph_node", "")):
+                    node_name = str(metadata.get("langgraph_node", ""))
+                    # 这些节点的 LLM 输出不应作为最终 token 推送
+                    skip_nodes = {"triage", "planner", "section_worker"}
+                    if any(n in tags or n == node_name for n in skip_nodes):
                         continue
                     chunk = event.get("data", {}).get("chunk", {})
                     if hasattr(chunk, "content") and chunk.content:
