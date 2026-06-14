@@ -1,0 +1,482 @@
+[
+  {
+    "query": "哪些机构参与了这项研究？",
+    "reference_answer": "Microsoft Research、Microsoft Strategic Missions and Technologies、Microsoft Office of the CTO。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      0
+    ]
+  },
+  {
+    "query": "GraphRAG 的处理过程分为哪两个阶段？",
+    "reference_answer": "第一阶段是构建实体知识图谱，第二阶段是为相关实体组生成社区摘要。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      3
+    ]
+  },
+  {
+    "query": "什么是 vector RAG 方法无法支持的查询类型？",
+    "reference_answer": "sensemaking queries，需要全局理解整个数据集的查询。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      6
+    ]
+  },
+  {
+    "query": "在构建知识图谱后，系统如何对图进行分层处理？",
+    "reference_answer": "将图划分为层次化的社区结构。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      9
+    ]
+  },
+  {
+    "query": "在比较 GraphRAG 和 Vector RAG 时，使用了哪种 LLM 进行答案评估？",
+    "reference_answer": "在比较中使用了 GPT-4 作为 LLM 进行答案评估。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      12
+    ]
+  },
+  {
+    "query": "在传统RAG方法中，通常使用什么技术来检索与查询语义相似的记录？",
+    "reference_answer": "传统RAG方法通常使用文本嵌入技术进行检索。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      15
+    ]
+  },
+  {
+    "query": "GraphRAG属于哪一类研究？",
+    "reference_answer": "GraphRAG属于使用知识图谱与LLMs和RAG结合的近期研究。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      18
+    ]
+  },
+  {
+    "query": "GraphRAG 通过什么方法递归创建越来越全局的摘要？",
+    "reference_answer": "GraphRAG 使用 LLM 创建跨越社区层次结构的摘要。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      21
+    ]
+  },
+  {
+    "query": "Adaptive benchmarking 的定义是什么？",
+    "reference_answer": "Adaptive benchmarking 是动态生成特定领域评估基准的过程。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      24
+    ]
+  },
+  {
+    "query": "哪些评估标准是针对向量RAG系统的，而不是全局推理的？",
+    "reference_answer": "context relevance, faithfulness, 和 answer relevance。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      27
+    ]
+  },
+  {
+    "query": "Graph RAG pipeline 中的 LLM-derived graph index 包含哪些元素？",
+    "reference_answer": "包含节点（如实体）、边（如关系）和共现信息。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      30
+    ]
+  },
+  {
+    "query": "文本块的大小选择对LLM提取信息的召回率有何影响？",
+    "reference_answer": "较长的文本块会降低早期信息的召回率。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      33
+    ]
+  },
+  {
+    "query": "Quantum Systems 何时拥有 NeoChip？",
+    "reference_answer": "Quantum Systems 从 2016 年开始拥有 NeoChip。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      36
+    ]
+  },
+  {
+    "query": "LLM 在提取实体、关系和主张时属于哪种摘要形式？",
+    "reference_answer": "属于抽象摘要形式。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      39
+    ]
+  },
+  {
+    "query": "在知识图谱到图社区的转换中，使用了哪种层次化的社区检测算法？",
+    "reference_answer": "使用了Leiden社区检测算法。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      42
+    ]
+  },
+  {
+    "query": "GraphRAG 如何生成社区摘要？",
+    "reference_answer": "通过添加节点、边和相关声明的元素摘要到社区摘要模板中生成。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      45
+    ]
+  },
+  {
+    "query": "在多阶段过程中，如何利用社区摘要生成最终答案？",
+    "reference_answer": "通过使用之前步骤生成的社区摘要来生成最终答案。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      48
+    ]
+  },
+  {
+    "query": "RAG系统在全局理解任务中生成的问题主要用于评估什么？",
+    "reference_answer": "评估RAG系统对给定语料库的高阶理解能力。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      51
+    ]
+  },
+  {
+    "query": "在评估中，K、M 和 N 的值分别设置为多少？",
+    "reference_answer": "K = M = N = 5。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      54
+    ]
+  },
+  {
+    "query": "在论文片段中，用户角色是什么？",
+    "reference_answer": "用户是科技记者，旨在寻找科技行业的见解和趋势。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      57
+    ]
+  },
+  {
+    "query": "什么是 Directness 控制标准？",
+    "reference_answer": "Directness 是评估回答是否具体明确的控制标准。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      60
+    ]
+  },
+  {
+    "query": "Podcast transcripts 这个语料库被分割成多少个文本块？",
+    "reference_answer": "1669个文本块，每个600个token。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      63
+    ]
+  },
+  {
+    "query": "C3 使用什么类型的社区摘要来回答查询？",
+    "reference_answer": "C3 使用低级社区摘要（数量最多）来回答查询。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      66
+    ]
+  },
+  {
+    "query": "Podcast数据集在虚拟机上运行时，使用gpt-4-turbo模型需要多少分钟？",
+    "reference_answer": "Podcast数据集运行时间为281分钟。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      69
+    ]
+  },
+  {
+    "query": "Claimify 在 Experiment 1 的答案中提取了多少个唯一事实性陈述？",
+    "reference_answer": "Claimify 提取了 47,075 个唯一事实性陈述。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      72
+    ]
+  },
+  {
+    "query": "在Podcast转录数据集中，全局方法的全面性胜率范围是多少？",
+    "reference_answer": "全局方法在Podcast转录数据集中的全面性胜率范围为72-83%。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      75
+    ]
+  },
+  {
+    "query": "在Diversity指标下，C0的值是多少？",
+    "reference_answer": "C0的值是17。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      78
+    ]
+  },
+  {
+    "query": "C2对应的数值中，第二大的数值是多少？",
+    "reference_answer": "C2对应的数值中第二大的数值是57。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      81
+    ]
+  },
+  {
+    "query": "Map-reduce summarization of source texts 需要最多的 context tokens 吗？",
+    "reference_answer": "是的，map-reduce 摘要方法是最耗费资源的，需要最多的上下文 token。",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      84
+    ]
+  },
+  {
+    "query": "GraphRAG在低级别社区摘要（C3）中相比源文本摘要减少了多少上下文标记？",
+    "reference_answer": "26%-33%",
+    "paper_id": 1,
+    "relevant_chunk_indices": [
+      87
+    ]
+  },
+  {
+    "query": "知识图谱（Knowledge Graph）是由哪家公司于哪一年正式提出的？",
+    "reference_answer": "知识图谱（Knowledge Graph）由谷歌于2012年正式提出。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      0
+    ]
+  },
+  {
+    "query": "Sam Altman 的资产净值是多少？",
+    "reference_answer": "Sam Altman 的资产净值为 10 亿美元（2024 年）。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      3
+    ]
+  },
+  {
+    "query": "知识图谱的表示、存储、获取、推理、融合、问答、分析等七大方面属于哪个领域的研究内容？",
+    "reference_answer": "知识图谱覆盖的领域包括其表示、存储、获取、推理、融合、问答、分析等七大方面。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      6
+    ]
+  },
+  {
+    "query": "知识表示（Knowledge Representation）的Role III是什么？",
+    "reference_answer": "支持推理的表示基础。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      9
+    ]
+  },
+  {
+    "query": "最常用的知识表示方法包括哪些？",
+    "reference_answer": "属性图、RDF 图模型和 OWL 本体语言。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      12
+    ]
+  },
+  {
+    "query": "属性图在工业界的应用场景是什么？",
+    "reference_answer": "属性图在工业界有广泛应用。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      15
+    ]
+  },
+  {
+    "query": "OWL 是 RDF Schema 的什么？",
+    "reference_answer": "OWL 是 RDF Schema 的扩展。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      18
+    ]
+  },
+  {
+    "query": "在SWI序列中，从AE到BF的连接关系是什么？",
+    "reference_answer": "AE到BF通过一系列SWI连接。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      21
+    ]
+  },
+  {
+    "query": "在知识图谱中，三元组的表示方式是什么？",
+    "reference_answer": "三元组的表示方式为 G =（E, R, S)，其中 E 是实体，R 是关系，S 是三元组。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      24
+    ]
+  },
+  {
+    "query": "在三元组基本形式中，哪个元素用于连接实体？",
+    "reference_answer": "关系（Relation）用于连接实体。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      27
+    ]
+  },
+  {
+    "query": "在流程图中，哪个节点直接连接到 NAME: Fred？",
+    "reference_answer": "NAME: Grace、NAME: Dave、NAME: Ed 和 NAME: Helen 直接连接到 NAME: Fred。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      30
+    ]
+  },
+  {
+    "query": "属性图数据库如Neo4J提供了什么能力？",
+    "reference_answer": "关系模型的关联查询能力。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      33
+    ]
+  },
+  {
+    "query": "Memgraph 支持哪种查询语言？",
+    "reference_answer": "Memgraph 支持 Cypher 查询语言。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      36
+    ]
+  },
+  {
+    "query": "RDF 图数据库的主要查询语言是什么？",
+    "reference_answer": "RDF 图数据库的主要查询语言是 SPARQL。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      39
+    ]
+  },
+  {
+    "query": "在没有使用LLM的情况下，知识抽取主要依赖于哪些方法？",
+    "reference_answer": "人工规则和启发式方法。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      42
+    ]
+  },
+  {
+    "query": "在关系抽取的准确性评估中，如何检查关系描述的正确性？",
+    "reference_answer": "通过查看关系描述是否乱码或相对正确。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      45
+    ]
+  },
+  {
+    "query": "该检索增强生成架构中，知识检索模块的输出是什么？",
+    "reference_answer": "知识检索模块的输出是语义 chunk。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      48
+    ]
+  },
+  {
+    "query": "在实体内容部分，根层选择了多少个核心社区？",
+    "reference_answer": "根层选择了1个核心社区。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      51
+    ]
+  },
+  {
+    "query": "自下而上生成每个社区及其成员的摘要的目的是什么？",
+    "reference_answer": "有助于全面了解数据集。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      54
+    ]
+  },
+  {
+    "query": "该方法最适合回答哪种类型的问题？",
+    "reference_answer": "该方法最适合回答与特定实体相关的问题。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      57
+    ]
+  },
+  {
+    "query": "在全局搜索方法的map步骤中，社区报告被分割为哪种形式的文本块？",
+    "reference_answer": "预定义大小的文本块",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      60
+    ]
+  },
+  {
+    "query": "DRIFT 的终止条件目前设置为多少轮迭代？",
+    "reference_answer": "两轮迭代。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      63
+    ]
+  },
+  {
+    "query": "在 GraphRAG 实践过程中，用户反馈的挑战中提到的价格贵的主要原因是什么？",
+    "reference_answer": "主要因为使用 gpt-4-turbo 或 gpt-4o 模型，成本较高。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      66
+    ]
+  },
+  {
+    "query": "在论文中提到的create_final_communities步骤是由哪个函数构建的？",
+    "reference_answer": "create_final_communities步骤由build_create_final_communities_steps函数构建。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      69
+    ]
+  },
+  {
+    "query": "在GraphRAG Indexer中，加载输入文件时处理的是哪种文件类型？",
+    "reference_answer": "处理的是InputFileType.text类型的文件。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      72
+    ]
+  },
+  {
+    "query": "Entity Extraction Token Consumption 的计算公式是什么？",
+    "reference_answer": "(2200 + chunk) * (Base Call Count)",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      75
+    ]
+  },
+  {
+    "query": "LVM opening01 chat liquid 的 message 5 出现了几次？",
+    "reference_answer": "message 5 出现了 5 次。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      78
+    ]
+  },
+  {
+    "query": "在论文片段中，函数get_local_search_engine的输入包含哪些数据类型？",
+    "reference_answer": "输入包含reports、text_units、entities、relationships和covariates。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      81
+    ]
+  },
+  {
+    "query": "read_indexer_covariates函数中final_covariates包含哪些字段？",
+    "reference_answer": "id, human_readable_id, cc",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      84
+    ]
+  },
+  {
+    "query": "Scrooge的主关系是什么？",
+    "reference_answer": "Scrooge的主要关系包括他的商业伙伴、家人和雇员。",
+    "paper_id": 2,
+    "relevant_chunk_indices": [
+      87
+    ]
+  }
+]

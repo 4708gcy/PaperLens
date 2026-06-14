@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# 数据与模型（不入库）
+data/uploads/*
+data/papers/*
+data/*.db
+data/paperlens.db
+
+# 环境变量（含密钥，绝不入库）
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 评测临时产出（dataset 入库，results 不入）
+eval/results_*.json
+!eval/dataset.json
+
+# 临时调试文件
+tests/debug_*.txt
+convert_bin_to_safetensors.py
+
+# 日志
+*.log

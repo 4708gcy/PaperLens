@@ -1,0 +1,46 @@
+app:
+  name: "PaperLens"
+  version: "1.0.0"
+  host: "127.0.0.1"
+  port: 8000
+  debug: true
+
+llm:
+  api_key: ${DASHSCOPE_API_KEY}
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-plus"
+  fast_model: "qwen-turbo"
+  temperature: 0.7
+  max_tokens: 4096
+
+mimo:
+  api_key: ${MIMO_API_KEY}
+  base_url: "https://api.xiaomimimo.com/v1"
+  model: "mimo-v2-omni"  # omni 支持图片输入（pro 是纯文本）
+
+embedding:
+  # 本地路径（从 ModelScope 下载，PyTorch 格式）
+  model: "E:/ai八斗学院学习/models/BAAI/bge-m3"
+  dimension: 1024
+
+reranker:
+  # 本地路径（从 ModelScope 下载）
+  model: "E:/ai八斗学院学习/models/BAAI/bge-reranker-v2-m3"
+
+elasticsearch:
+  hosts: ["http://localhost:9200"]
+  index_prefix: "paperlens_paper"
+  chunk_size: 512
+  chunk_overlap: 64
+
+rag:
+  retrieval_top_k: 50
+  rerank_top_k: 5
+  rrf_k: 60
+  rerank_candidates: 20
+
+document:
+  max_pdf_pages: 200
+  upload_dir: "data/uploads"
+  papers_dir: "data/papers"
+  db_path: "data/paperlens.db"
