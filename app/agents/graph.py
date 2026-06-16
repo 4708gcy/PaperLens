@@ -44,6 +44,20 @@ from app.agents.prompts import (
 from app.logger import logger
 
 
+def _build_human_message(text: str, images: list) -> HumanMessage:
+    """构造 HumanMessage：有图片时用多模态（qwen3.7-plus 视觉），无图片则纯文本。
+
+    images 是 data URL 字符串列表（如 "data:image/jpeg;base64,..."）。
+    """
+    images = [img for img in (images or []) if img]
+    if not images:
+        return HumanMessage(content=text)
+    content = [{"type": "text", "text": text}]
+    for img in images:
+        content.append({"type": "image_url", "image_url": {"url": img}})
+    return HumanMessage(content=content)
+
+
 # ── LLM 实例 ──
 def _make_llm(temperature: float = 0.7, model: str = None) -> ChatOpenAI:
     """创建 LLM 实例（OpenAI 兼容协议调 Qwen，含 retry 应对 QPS 限流）
@@ -188,13 +202,32 @@ def retrieve_node(state: PaperLensState) -> dict:
             paper_ids=paper_ids,
             top_k=settings["rag"]["rerank_top_k"]
         )
+        # 查文档标题，context 里用「论文{id}: 标题」而不是纯数字 ID
+        from app.models.orm import Database, Paper
+        title_map = {}
+        try:
+            db = Database.get_session()
+            try:
+                for p in db.query(Paper).filter(Paper.paper_id.in_(paper_ids)).all():
+                    title_map[p.paper_id] = p.title
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+        # 在 context 顶部注入「语料范围内所有文档清单」，这样「列出文档」类问题能看到全部
+        doc_list_lines = [f"- 论文{pid}：{title_map.get(pid, '(未知标题)')}" for pid in paper_ids]
+        doc_list_block = "【语料范围内所有文档】\n" + "\n".join(doc_list_lines) + "\n"
+
         if not results:
-            context = "（未检索到相关论文内容）"
+            context = doc_list_block + "（未检索到与问题相关的片段）"
         else:
-            parts = []
+            parts = [doc_list_block]
             for i, r in enumerate(results, 1):
+                _t = title_map.get(r.paper_id, "")
+                _label = f"论文{r.paper_id}（{_t}）" if _t else f"论文{r.paper_id}"
                 parts.append(
-                    f"[资料 {i}]（论文{r.paper_id} 第{r.source_page}页，相关性 {r.score:.3f}）\n{r.content}"
+                    f"[资料 {i}]（{_label} 第{r.source_page}页，相关性 {r.score:.3f}）\n{r.content}"
                 )
             context = "\n\n---\n\n".join(parts)
         logger.info(f"qa 检索完成: {len(results)} 条结果")
@@ -215,6 +248,7 @@ def qa_node(state: PaperLensState) -> dict:
     """
     last_msg = state["messages"][-1]
     retrieval_mode = state.get("retrieval_mode", "")
+    images = state.get("images", [])
 
     if retrieval_mode == "rag":
         # 综合问答：用 ES 检索片段
@@ -238,7 +272,7 @@ def qa_node(state: PaperLensState) -> dict:
 
     response = llm.invoke([
         SystemMessage(content=prompt),
-        HumanMessage(content=last_msg.content)
+        _build_human_message(last_msg.content, images)
     ])
     logger.info(f"qa 完成（素材={source}）")
     return {"messages": [response]}
@@ -301,6 +335,7 @@ def learn_node(state: PaperLensState) -> dict:
     mode = state.get("learn_mode", "qa") or "qa"
     last_msg = state["messages"][-1]
     retrieved_context = state.get("context", "")
+    images = state.get("images", [])
     config = state.get("learn_config", {}) or {}
     user_outline = state.get("learn_outline", "") or ""
     paper_ids = state.get("paper_ids", []) or []
@@ -349,15 +384,17 @@ def learn_node(state: PaperLensState) -> dict:
         prompt = template.format(context=context)
 
     # summary/flashcard/quiz/notes/slides 是"一键生成"类任务：用户消息作为任务指令补充
-    # qa 模式则是正常问答
+    # qa 模式则是正常问答，且支持用户附带图片（多模态）
     if mode == "qa":
         user_content = last_msg.content
+        human_msg = _build_human_message(user_content, images)
     else:
         user_content = f"请基于上面的【{source_note}】完成此任务。学生原始输入：{last_msg.content}"
+        human_msg = HumanMessage(content=user_content)
 
     response = llm.invoke([
         SystemMessage(content=prompt),
-        HumanMessage(content=user_content)
+        human_msg
     ])
     logger.info(f"学习助手完成（mode={mode}, 素材={source_note}）")
     return {"messages": [response]}
@@ -571,12 +608,27 @@ def assembler_node(state: PaperLensState) -> dict:
     paper_ids = state.get("paper_ids", [])
 
     body = "\n\n".join(sections)
-    references = "\n".join([f"- 论文{pid}" for pid in paper_ids])
+    # 参考文献带上标题，避免 LLM 只输出无意义的"论文1/论文2"
+    from app.models.orm import Database, Paper
+    ref_lines = []
+    try:
+        db = Database.get_session()
+        try:
+            for pid in paper_ids:
+                p = db.query(Paper).filter(Paper.paper_id == pid).first()
+                title = p.title if p else "(未知标题)"
+                ref_lines.append(f"- 论文{pid}：{title}")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"读取论文标题失败，参考文献回退纯编号: {e}")
+        ref_lines = [f"- 论文{pid}" for pid in paper_ids]
+    references = "\n".join(ref_lines)
 
     prompt = ASSEMBLER_SYSTEM.format(topic=topic)
     response = llm.invoke([
         SystemMessage(content=prompt),
-        HumanMessage(content=f"各章节内容：\n\n{body}\n\n参考文献论文：{references}")
+        HumanMessage(content=f"各章节内容：\n\n{body}\n\n参考文献（含论文编号与标题，请在报告末尾原样列出，不要省略标题）：\n{references}")
     ])
 
     return {"messages": [response], "final_report": response.content}
@@ -665,6 +717,7 @@ def build_graph():
     builder.add_conditional_edges(
         "triage", route_after_triage,
         {
+            "retrieve": "retrieve",
             "planner": "planner",
             "qa_agent": "qa_agent",
             "analyze_agent": "analyze_agent",

@@ -17,10 +17,13 @@ def upload_document(file) -> dict:
 
 
 def list_documents() -> dict:
-    """列出所有论文"""
-    with httpx.Client(timeout=30) as client:
-        response = client.get(f"{BASE_URL}/documents/list")
-    return response.json()
+    """列出所有论文。后端不可用时返回安全的空结构，不抛异常（避免前端白屏）"""
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.get(f"{BASE_URL}/documents/list")
+        return response.json()
+    except Exception:
+        return {"code": 503, "msg": "后端未响应", "data": []}
 
 
 def delete_document(paper_id: int) -> dict:
@@ -30,17 +33,19 @@ def delete_document(paper_id: int) -> dict:
     return response.json()
 
 
-def chat(message: str, paper_ids: List[int], thread_id: str = "default") -> dict:
-    """普通对话"""
+def chat(message: str, paper_ids: List[int], thread_id: str = "default",
+         images: List[str] = None) -> dict:
+    """普通对话（含可选多模态图片）"""
+    body = {"message": message, "paper_ids": paper_ids, "thread_id": thread_id}
+    if images:
+        body["images"] = images
     with httpx.Client(timeout=180) as client:
-        response = client.post(
-            f"{BASE_URL}/chat/",
-            json={"message": message, "paper_ids": paper_ids, "thread_id": thread_id}
-        )
+        response = client.post(f"{BASE_URL}/chat/", json=body)
     return response.json()
 
 
-def chat_stream(message: str, paper_ids: List[int], thread_id: str = "default") -> Generator[dict, None, None]:
+def chat_stream(message: str, paper_ids: List[int], thread_id: str = "default",
+                images: List[str] = None) -> Generator[dict, None, None]:
     """
     流式对话 —— 生成器，逐段 yield 事件 dict
 
@@ -49,12 +54,19 @@ def chat_stream(message: str, paper_ids: List[int], thread_id: str = "default") 
     - {"type": "token", "content": "..."}
     - {"type": "done", "intent": "..."}
     - {"type": "error", "msg": "..."}
+
+    images: 可选，data URL 列表（如 "data:image/jpeg;base64,..."），
+            传入后后端构造多模态消息（qwen3.7-plus 视觉理解）。
     """
-    with httpx.Client(timeout=300) as client:
+    body = {"message": message, "paper_ids": paper_ids, "thread_id": thread_id}
+    if images:
+        body["images"] = images
+    # 综述等多步骤任务耗时长（思考模式 + Send 并行），放宽到 10 分钟
+    with httpx.Client(timeout=600) as client:
         with client.stream(
             "POST",
             f"{BASE_URL}/chat/stream",
-            json={"message": message, "paper_ids": paper_ids, "thread_id": thread_id}
+            json=body
         ) as response:
             for line in response.iter_lines():
                 if line and line.startswith("data: "):
@@ -71,24 +83,26 @@ def analyze(paper_id: int, thread_id: str = "analyze") -> Generator[dict, None, 
     yield from chat_stream(message, [paper_id], thread_id)
 
 
-def rag_chat_stream(message: str, paper_ids: List[int], thread_id: str = "rag") -> Generator[dict, None, None]:
+def rag_chat_stream(message: str, paper_ids: List[int], thread_id: str = "rag",
+                    images: List[str] = None) -> Generator[dict, None, None]:
     """综合问答 · 跨文档检索问答（流式）
 
     与 chat_stream 的区别：带 retrieval_mode="rag"，后端会走 ES 检索
     （从 paper_ids 对应的文档里捞出相关片段）而不是全文直喂。
     适合「在大量文档里找讲过 X 的地方」这类跨文档定位问题。
+
+    images: 可选，data URL 列表，传入则构造多模态消息（qwen3.7-plus 视觉）。
     """
+    body = {
+        "message": message,
+        "paper_ids": paper_ids,
+        "thread_id": thread_id,
+        "retrieval_mode": "rag",
+    }
+    if images:
+        body["images"] = images
     with httpx.Client(timeout=300) as client:
-        with client.stream(
-            "POST",
-            f"{BASE_URL}/chat/stream",
-            json={
-                "message": message,
-                "paper_ids": paper_ids,
-                "thread_id": thread_id,
-                "retrieval_mode": "rag",
-            }
-        ) as response:
+        with client.stream("POST", f"{BASE_URL}/chat/stream", json=body) as response:
             for line in response.iter_lines():
                 if line and line.startswith("data: "):
                     try:
@@ -114,12 +128,13 @@ def learn_stream(
     thread_id: str = "learn",
     learn_outline: str = "",
     learn_config: Dict[str, Any] = None,
+    images: List[str] = None,
 ) -> Generator[dict, None, None]:
     """
     学习助手流式对话。
 
     mode 取值：
-    - qa       辅导式问答（chat 流式，逐字显示）
+    - qa       辅导式问答（chat 流式，逐字显示，支持图片）
     - summary  一键总结（流式输出 Markdown 摘要）
     - flashcard 知识卡片（流式输出 JSON，前端在 done 后解析）
     - quiz     自测练习（流式输出 JSON，前端在 done 后解析）
@@ -128,6 +143,7 @@ def learn_stream(
 
     learn_outline: 用户确认后的大纲（分步向导产物），透传给后端
     learn_config: 其他配置（detail_level / theme / page_count / focus）
+    images: 可选，data URL 列表，仅 qa 模式有意义（多模态提问）
     """
     body = {
         "message": message,
@@ -139,6 +155,8 @@ def learn_stream(
         body["learn_outline"] = learn_outline
     if learn_config:
         body["learn_config"] = learn_config
+    if images:
+        body["images"] = images
     with httpx.Client(timeout=300) as client:
         with client.stream(
             "POST",
@@ -221,9 +239,26 @@ def generate_outline(paper_ids, mode: str, focus: str = "", **extra) -> str:
     return (resp.get("data") or {}).get("outline", "")
 
 
-def learn_qa(message: str, paper_ids, thread_id: str = "learn") -> Generator[dict, None, None]:
-    """学习助手 · 辅导式问答（支持多篇资料）"""
-    yield from learn_stream(message, _as_id_list(paper_ids), "qa", thread_id)
+def export_slides_pptx(markdown: str) -> bytes:
+    """把 Marp Markdown 转成 PPTX 二进制（后端调 marp-cli）。
+
+    返回 PPTX 文件字节；失败抛 RuntimeError。
+    """
+    with httpx.Client(timeout=300) as client:
+        response = client.post(
+            f"{BASE_URL}/learn/slides/export",
+            json={"markdown": markdown, "format": "pptx"},
+        )
+    if response.status_code != 200:
+        raise RuntimeError(f"导出 PPTX 失败：HTTP {response.status_code}")
+    return response.content
+
+
+def learn_qa(message: str, paper_ids, thread_id: str = "learn",
+             images: List[str] = None) -> Generator[dict, None, None]:
+    """学习助手 · 辅导式问答（支持多篇资料，支持图片提问）"""
+    yield from learn_stream(message, _as_id_list(paper_ids), "qa", thread_id,
+                            images=images)
 
 
 def learn_summary(paper_ids, thread_id: str = "learn") -> Generator[dict, None, None]:

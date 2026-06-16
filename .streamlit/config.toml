@@ -1,0 +1,4 @@
+[server]
+# 录制演示时关闭文件热重载，避免编辑文件导致页面突然刷新（"Always rerun" 烦人）
+# 改了前端代码后，手动在浏览器刷新即可
+fileWatcherType = "none"

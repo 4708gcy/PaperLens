@@ -97,7 +97,7 @@ class DocumentService:
             if not markdown_content.strip():
                 raise DocumentProcessError(f"Markdown 内容为空: {file_path}")
 
-            # ── Step 5: 图表多模态理解（MiMo）──
+            # ── Step 5: 图表多模态理解（qwen3.7-plus 视觉能力）──
             # 顺序调整：先理解图片，再把【图片描述补进 markdown】，
             # 这样保存的 .md 和全文任务(笔记/PPT/summary)都能看到图片内容，
             # 不再只靠 ES 里的 image_caption 片段。
@@ -123,7 +123,7 @@ class DocumentService:
             # 以「图表说明」区块附在正文末尾，LLM 读全文时能理解图表含义。
             # （不插入到原 `![]()` 位置，因为定位困难且可能打乱版面。）
             if image_captions:
-                caption_lines = ["", "<!-- ===== 图表说明（MiMo 多模态生成）===== -->", ""]
+                caption_lines = ["", "<!-- ===== 图表说明（qwen3.7-plus 视觉理解生成）===== -->", ""]
                 for ic in image_captions:
                     img_name = Path(ic["image_path"]).name
                     caption_lines.append(f"**📊 {img_name}**：{ic['description']}")

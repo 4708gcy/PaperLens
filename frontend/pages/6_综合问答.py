@@ -56,6 +56,15 @@ with st.sidebar:
             st.info(f"📂 将在选中的 {len(selected_ids)} 篇文档里检索")
 
     st.divider()
+    # 语料变化检测：切换「全部/自选」或改变勾选文档时，清空旧对话 + 换新 thread_id
+    # 否则右侧还显示上一个语料范围的问答，与当前语料不一致
+    _scope_key = f"{scope_mode}_{'_'.join(map(str, sorted(selected_ids)))}"
+    if st.session_state.get("rag_last_scope_key") != _scope_key:
+        st.session_state["rag_last_scope_key"] = _scope_key
+        st.session_state.rag_messages = []
+        st.session_state.rag_thread_id = f"rag_{int(time.time())}"
+        st.rerun()  # 必须重跑，否则旧消息还在屏幕上
+
     # 对话管理
     if "rag_thread_id" not in st.session_state:
         st.session_state.rag_thread_id = f"rag_{int(time.time())}"
@@ -84,24 +93,55 @@ with st.sidebar:
 if "rag_messages" not in st.session_state:
     st.session_state.rag_messages = []
 
+# 图片上传区（多模态：qwen3.7-plus 可看图）
+import base64
+
+def _encode_image_to_data_url(uploaded) -> str:
+    """把 Streamlit UploadedFile 转成 data URL（base64），供 qwen3.7-plus 视觉输入。"""
+    raw = uploaded.getvalue()
+    ext = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else "jpeg"
+    mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png",
+            "webp": "webp", "gif": "gif", "bmp": "bmp"}.get(ext, "jpeg")
+    b64 = base64.b64encode(raw).decode()
+    return f"data:image/{mime};base64,{b64}"
+
+# 待发送图片（顶层调用，不包 with container，避免 chat_input 嵌套报错）
+uploaded_images = st.file_uploader(
+    "📎 上传图片提问（可选，qwen3.7-plus 会看图）",
+    type=["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+    accept_multiple_files=True,
+    key="rag_img_uploader",
+)
+pending_images = [_encode_image_to_data_url(img) for img in (uploaded_images or [])]
+
 # 显示历史
 for msg in st.session_state.rag_messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        # 历史里也回显用户当时上传的图
+        for img_url in msg.get("images", []):
+            st.image(img_url, width=200)
 
 # 接收输入
-if prompt := st.chat_input("跨文档提问，例如：哪些资料讲到了注意力机制？"):
+if prompt := st.chat_input("跨文档提问，例如：哪些资料讲到了注意力机制？（上方可附图）"):
     if not selected_ids:
         st.warning("请先在左侧选择语料范围。")
         st.stop()
-    st.session_state.rag_messages.append({"role": "user", "content": prompt})
+    st.session_state.rag_messages.append({
+        "role": "user", "content": prompt, "images": pending_images
+    })
     with st.chat_message("user"):
         st.markdown(prompt)
+        for img_url in pending_images:
+            st.image(img_url, width=200)
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
-        for event in rag_chat_stream(prompt, selected_ids, st.session_state.rag_thread_id):
+        for event in rag_chat_stream(
+            prompt, selected_ids, st.session_state.rag_thread_id,
+            images=pending_images or None,
+        ):
             t = event.get("type")
             if t == "token":
                 full_response += event.get("content", "")

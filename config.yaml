@@ -8,20 +8,16 @@ app:
 llm:
   api_key: ${DASHSCOPE_API_KEY}
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  # 主力模型（回答/解读/综述/学习辅导）：性价比高、输出稳定、同音错字少
+  # 主力模型（回答/解读/综述/学习辅导/图表理解）：qwen3.7-plus 支持文本+图片输入
   # 可用 model name 见百炼「选择模型」：https://help.aliyun.com/zh/model-studio/models
   model: "qwen3.7-plus"
-  fast_model: "qwen-turbo"       # 快速模型（仅意图分类等辅助任务），省钱
+  fast_model: "qwen-turbo"       # 快速模型（仅意图分类/大纲生成等辅助任务），省钱
   temperature: 0.7
-  max_tokens: 4096
+  # 输出 token 上限：笔记/PPT/综述等长文任务需要较大空间，4096 会截断
+  max_tokens: 8192
   # qwen3.7-plus 是混合思考模型：true 时先思考再答（质量高、但流式首 token 慢 ~45s）；
   # false 时直接回答（首 token ~1s）。默认开启以获得更好的回答质量。
   enable_thinking: true
-
-mimo:
-  api_key: ${MIMO_API_KEY}
-  base_url: "https://api.xiaomimimo.com/v1"
-  model: "mimo-v2-omni"  # omni 支持图片输入（pro 是纯文本）
 
 embedding:
   # 本地路径（从 ModelScope 下载，PyTorch 格式）
@@ -49,7 +45,7 @@ document:
   upload_dir: "data/uploads"
   papers_dir: "data/papers"
   db_path: "data/paperlens.db"
-  # 单个 mineru 输出目录下，最多给多少张图片调 MiMo 生成文字描述。
+  # 单个 mineru 输出目录下，最多给多少张图片调 qwen3.7-plus 生成文字描述。
   # 描述会同时写进合并 markdown（供全文任务理解图片）和 ES（供检索）。
   # 设 0 表示不生成图片描述；null/省略表示不设上限（处理全部图片）。
   max_images_per_dir: 30

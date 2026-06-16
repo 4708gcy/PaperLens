@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from api_client import upload_document, list_documents, delete_document
 
 st.title("📚 论文管理")
-st.markdown("上传论文 PDF（或 DOC/DOCX/PPT/PPTX），AI 用 MinerU 解析、MiMo 理解图表、ES 建立检索索引。")
+st.markdown("上传论文 PDF（或 DOC/DOCX/PPT/PPTX），AI 用 MinerU 解析、qwen3.7-plus 理解图表、ES 建立检索索引。")
 
 # 上传区
 uploaded_file = st.file_uploader(
@@ -26,7 +26,7 @@ if uploaded_file and st.button("📤 上传并处理", type="primary"):
             st.stop()
     if result.get("code") == 200:
         st.success(f"✅ {uploaded_file.name} 上传成功！paper_id={result['data']['paper_id']}")
-        st.info("⏳ 后台正在处理（MinerU 解析 + MiMo 图表理解 + 向量化索引），约 1-3 分钟")
+        st.info("⏳ 后台正在处理（MinerU 解析 + qwen3.7-plus 图表理解 + 向量化索引），约 1-3 分钟")
     else:
         st.error(f"❌ 上传失败：{result.get('msg')}")
 

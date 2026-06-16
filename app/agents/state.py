@@ -34,6 +34,9 @@ class PaperLensState(TypedDict):
     learn_config: dict
     # 综合问答模块用：retrieval_mode="rag" 时 qa 走 ES 检索；空则走全文
     retrieval_mode: str
+    # 用户本次提问附带的多模态图片（data URL 列表，供 qwen3.7-plus 视觉理解）
+    # 留空则纯文本问答；非空时节点构造多模态 HumanMessage
+    images: List[str]
     # 综述主题（仅 synthesize 用）
     topic: str
     # 综述章节（Send 并行 reduce，Phase 3 用）

@@ -1,13 +1,14 @@
 """
-MiMo-v2-omni 多模态图表理解
+qwen3.7-plus 多模态图表理解
+
+复用主力 LLM（DashScope 的 qwen3.7-plus，支持图片输入）理解论文图表，
+无需单独的多模态服务（原 MiMo 已替换为 qwen3.7-plus）。
 
 调用范式（OpenAI 兼容）：
   messages=[{"role":"user","content":[
       {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,{b64}"}},
       {"type":"text","text":"描述这张图"}
   ]}]
-
-注意：mimo-v2-pro 是纯文本模型，多模态要用 mimo-v2-omni
 """
 import base64
 from pathlib import Path
@@ -18,14 +19,15 @@ from app.logger import logger
 
 
 class MultimodalManager:
-    """MiMo 多模态调用管理"""
+    """多模态图表理解管理（复用 qwen3.7-plus 的视觉能力）"""
 
     def __init__(self):
+        # 复用主力 LLM 配置（DashScope OpenAI 兼容接口 + qwen3.7-plus，支持图片输入）
         self.client = OpenAI(
-            api_key=settings["mimo"]["api_key"],
-            base_url=settings["mimo"]["base_url"]
+            api_key=settings["llm"]["api_key"],
+            base_url=settings["llm"]["base_url"]
         )
-        self.model = settings["mimo"]["model"]
+        self.model = settings["llm"]["model"]
 
     def _encode_image(self, image_path: str) -> str:
         """图片转 base64 data URL"""
@@ -40,7 +42,7 @@ class MultimodalManager:
 
     def understand_image(self, image_path: str, prompt: Optional[str] = None) -> str:
         """
-        让 MiMo 理解一张图片，返回自然语言描述
+        让 qwen3.7-plus 理解一张图片，返回自然语言描述
 
         参数：
             image_path: 图片文件路径
@@ -73,7 +75,7 @@ class MultimodalManager:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            logger.error(f"MiMo 调用失败 {image_path}: {e}")
+            logger.error(f"图表理解调用失败 {image_path}: {e}")
             return ""
 
     def describe_paper_images(
@@ -97,7 +99,7 @@ class MultimodalManager:
 
         results = []
         for img_path in images:
-            logger.info(f"MiMo 理解图片: {img_path.name}")
+            logger.info(f"图表理解: {img_path.name}")
             desc = self.understand_image(str(img_path))
             if desc:
                 results.append({

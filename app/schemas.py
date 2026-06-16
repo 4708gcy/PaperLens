@@ -24,6 +24,8 @@ class ChatRequest(BaseModel):
     # 综合问答模块用：retrieval_mode="rag" 时走 ES 检索（跨文档），
     # 而非默认的全文直喂。综合问答页传 "rag"，其他页不传（走全文）。
     retrieval_mode: str = ""
+    # 用户本次提问附带的多模态图片（data URL 列表，qwen3.7-plus 视觉理解）
+    images: List[str] = []
 
 
 class OutlineRequest(BaseModel):

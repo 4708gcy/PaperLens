@@ -13,6 +13,8 @@
 """
 import json
 import time
+import base64
+import re
 import streamlit as st
 import sys
 from pathlib import Path
@@ -246,10 +248,12 @@ with tab_qa:
     if "learn_messages" not in st.session_state:
         st.session_state.learn_messages = []
 
-    # 切换资料选择时清空聊天显示
+    # 切换资料选择时清空聊天显示 + 换新对话
     if st.session_state.get("learn_msg_paper_key") != _thread_key:
         st.session_state.learn_msg_paper_key = _thread_key
         st.session_state.learn_messages = []
+        st.session_state.learn_thread_id = f"learn_{_thread_key}_{int(time.time())}"
+        st.rerun()
 
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -265,15 +269,39 @@ with tab_qa:
     for msg in st.session_state.learn_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            for img_url in msg.get("images", []):
+                st.image(img_url, width=200)
 
-    if prompt := st.chat_input("针对所选资料提问，AI 会辅导式讲解…"):
-        st.session_state.learn_messages.append({"role": "user", "content": prompt})
+    # 图片上传（多模态：qwen3.7-plus 可看图）
+    def _encode_image_to_data_url(uploaded) -> str:
+        raw = uploaded.getvalue()
+        ext = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else "jpeg"
+        mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png",
+                "webp": "webp", "gif": "gif", "bmp": "bmp"}.get(ext, "jpeg")
+        b64 = base64.b64encode(raw).decode()
+        return f"data:image/{mime};base64,{b64}"
+
+    uploaded_images = st.file_uploader(
+        "📎 上传图片提问（可选，qwen3.7-plus 会看图）",
+        type=["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+        accept_multiple_files=True,
+        key="learn_qa_img_uploader",
+    )
+    pending_images = [_encode_image_to_data_url(img) for img in (uploaded_images or [])]
+
+    if prompt := st.chat_input("针对所选资料提问，AI 会辅导式讲解…（上方可附图）"):
+        st.session_state.learn_messages.append({
+            "role": "user", "content": prompt, "images": pending_images
+        })
         with st.chat_message("user"):
             st.markdown(prompt)
+            for img_url in pending_images:
+                st.image(img_url, width=200)
         with st.chat_message("assistant"):
             placeholder = st.empty()
             full = ""
-            for event in learn_qa(prompt, selected_ids, st.session_state.learn_thread_id):
+            for event in learn_qa(prompt, selected_ids, st.session_state.learn_thread_id,
+                                   images=pending_images or None):
                 t = event.get("type")
                 if t == "token":
                     full += event.get("content", "")
@@ -333,6 +361,12 @@ with tab_card:
                 st.warning("未能解析出闪卡 JSON，原始输出如下，可手动查看：")
                 st.code(raw, language="json")
             st.stop()
+        # 只保留合法的卡片 dict（LLM 偶尔输出杂质元素）
+        cards = [c for c in cards if isinstance(c, dict) and c.get("front")]
+        if not cards:
+            st.warning("闪卡解析成功但格式异常（没有有效卡片），原始输出如下：")
+            st.code(raw, language="json")
+            st.stop()
         st.session_state["flashcards"] = cards
         st.rerun()  # 持久化后重跑，清掉按钮按下态
 
@@ -343,6 +377,8 @@ with tab_card:
         for i in range(0, len(cards), 2):
             cols = st.columns(2)
             for j, card in enumerate(cards[i:i + 2]):
+                if not isinstance(card, dict):
+                    continue
                 with cols[j]:
                     front = card.get("front", "")
                     back = card.get("back", "")
@@ -397,6 +433,12 @@ with tab_quiz:
                 st.warning("未能解析出题目 JSON，原始输出如下，可手动查看：")
                 st.code(raw, language="json")
             st.stop()
+        # 只保留合法的题目 dict（LLM 偶尔会输出杂质元素，如字符串/数字）
+        quizzes = [q for q in quizzes if isinstance(q, dict) and q.get("question")]
+        if not quizzes:
+            st.warning("题目解析成功但格式异常（没有有效题目），原始输出如下：")
+            st.code(raw, language="json")
+            st.stop()
         # 存进 session_state：题目、标准答案、每题作答状态、是否已提交
         st.session_state["quiz_questions"] = quizzes
         st.session_state["quiz_submitted"] = {i: False for i in range(len(quizzes))}
@@ -411,10 +453,18 @@ with tab_quiz:
         score = 0
         answered = 0
         for idx, q in enumerate(quizzes):
+            # 防御：跳过非 dict（理论上已在存入前过滤，这里再兜底）
+            if not isinstance(q, dict):
+                continue
             question = q.get("question", "")
-            options = q.get("options", [])
+            options = q.get("options", []) or []
             answer = str(q.get("answer", "")).strip().upper()
             explanation = q.get("explanation", "")
+            # LLM 偶尔会在选项里自带字母前缀（如 "A. xxx"），去掉避免和前端补的字母重复（显示成 AA）
+            def _strip_opt_prefix(opt: str) -> str:
+                s = str(opt).strip()
+                return re.sub(r"^[A-Fa-f][.、\)]\s*", "", s)
+            options = [_strip_opt_prefix(o) for o in options]
             opt_labels = [
                 f"{letters[k]}. {opt}" if k < len(letters) else opt
                 for k, opt in enumerate(options)
@@ -491,6 +541,13 @@ with tab_notes:
             key="notes_focus_input",
         )
         detail = st.selectbox("详细程度", ["精简", "标准", "详尽"], index=1, key="notes_detail_input")
+        note_mode = st.radio(
+            "生成模式",
+            options=["单文件（一篇完整笔记）", "分章节（每个大纲条目一份笔记）"],
+            index=0,
+            key="notes_mode_input",
+            help="分章节模式会按大纲的每个条目单独生成一份 Markdown，适合拆成多个文件复习。",
+        )
         if st.button("🪄 生成笔记大纲", type="primary"):
             if not selected_ids:
                 st.warning("请先在左侧选择至少一篇文档。")
@@ -510,12 +567,14 @@ with tab_notes:
             st.session_state["notes_outline"] = outline
             st.session_state["notes_focus"] = focus
             st.session_state["notes_detail"] = detail
+            st.session_state["notes_mode"] = note_mode
             st.session_state["notes_step"] = 2
             st.rerun()
 
     # Step 2：编辑大纲
     if step == 2:
-        st.success("✅ 大纲已生成，可自由增删改后再生成完整笔记。")
+        _mode = st.session_state.get("notes_mode", "单文件（一篇完整笔记）")
+        st.success(f"✅ 大纲已生成（{_mode}），可自由增删改后再生成。")
         edited = st.text_area(
             "笔记大纲（每行一个章节/主题，可编辑）",
             value=st.session_state.get("notes_outline", ""),
@@ -524,7 +583,8 @@ with tab_notes:
         )
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("✅ 确认大纲，生成完整笔记", type="primary"):
+            _btn_label = "✅ 确认大纲，分章节生成" if "分章节" in _mode else "✅ 确认大纲，生成完整笔记"
+            if st.button(_btn_label, type="primary"):
                 st.session_state["notes_outline_confirmed"] = edited
                 st.session_state["notes_step"] = 3
                 st.rerun()
@@ -538,62 +598,104 @@ with tab_notes:
         outline_confirmed = st.session_state.get("notes_outline_confirmed", "")
         focus = st.session_state.get("notes_focus", "")
         detail = st.session_state.get("notes_detail", "标准")
-        # 只有「还没生成过」才真正跑 LLM；已有结果则直接复用（避免重跑重复生成）
-        if "notes_result" not in st.session_state:
-            st.info(f"📋 按确认的大纲生成中（详细程度：{detail}）…")
-            with st.chat_message("assistant"):
-                placeholder = st.empty()
-                full = ""
-                for event in learn_notes(
-                    selected_ids, st.session_state.learn_thread_id,
-                    outline=outline_confirmed, detail_level=detail, focus=focus,
-                ):
-                    t = event.get("type")
-                    if t == "token":
-                        full += event.get("content", "")
-                        placeholder.markdown(full + "▌")
-                    elif t == "done":
-                        placeholder.markdown(full)
-                    elif t == "error":
-                        placeholder.error(f"错误：{event.get('msg')}")
-            # 持久化生成结果，后续重跑不再重新调 LLM
-            st.session_state["notes_result"] = full
-        else:
-            full = st.session_state["notes_result"]
-            with st.chat_message("assistant"):
-                st.markdown(full)
+        note_mode = st.session_state.get("notes_mode", "单文件（一篇完整笔记）")
+        is_split = "分章节" in note_mode
 
-        if full:
-            st.divider()
-            st.download_button(
-                "📥 下载复习笔记 (.md)",
-                data=full,
-                file_name=f"复习笔记_{'_'.join(selected_titles)[:30]}.md",
-                mime="text/markdown",
-            )
-        if st.button("✏️ 回去改大纲"):
+        if not is_split:
+            # —— 单文件模式：原有逻辑 ——
+            # 只有「还没生成过」才真正跑 LLM；已有结果则直接复用（避免重跑重复生成）
+            if "notes_result" not in st.session_state:
+                st.info(f"📋 按确认的大纲生成中（详细程度：{detail}）…")
+                with st.chat_message("assistant"):
+                    placeholder = st.empty()
+                    full = ""
+                    for event in learn_notes(
+                        selected_ids, st.session_state.learn_thread_id,
+                        outline=outline_confirmed, detail_level=detail, focus=focus,
+                    ):
+                        t = event.get("type")
+                        if t == "token":
+                            full += event.get("content", "")
+                            placeholder.markdown(full + "▌")
+                        elif t == "done":
+                            placeholder.markdown(full)
+                        elif t == "error":
+                            placeholder.error(f"错误：{event.get('msg')}")
+                # 持久化生成结果，后续重跑不再重新调 LLM
+                st.session_state["notes_result"] = full
+            else:
+                full = st.session_state["notes_result"]
+                with st.chat_message("assistant"):
+                    st.markdown(full)
+
+            if full:
+                st.divider()
+                st.download_button(
+                    "📥 下载复习笔记 (.md)",
+                    data=full,
+                    file_name=f"复习笔记_{'_'.join(selected_titles)[:30]}.md",
+                    mime="text/markdown",
+                )
+        else:
+            # —— 分章节模式：按大纲条目逐个生成 ——
+            # 解析大纲条目（去掉空行和纯分隔符）
+            outline_items = [
+                line.strip().lstrip("-•").strip()
+                for line in outline_confirmed.split("\n")
+                if line.strip() and not line.strip().startswith("<!--")
+            ]
+            outline_items = [it for it in outline_items if it and it != "---"]
+            if "notes_split_results" not in st.session_state:
+                st.session_state["notes_split_results"] = {}  # {标题: 内容}
+            results = st.session_state["notes_split_results"]
+            n = len(outline_items)
+            for ci, item in enumerate(outline_items, 1):
+                # 清理标题做文件名（去特殊字符）
+                safe_title = re.sub(r'[\\/:*?"<>|]', "_", item)[:30]
+                if item in results:
+                    # 已生成，展示
+                    st.markdown(f"### 📄 {ci}. {item}")
+                    with st.expander("查看内容", expanded=(ci == 1)):
+                        st.markdown(results[item])
+                    st.download_button(
+                        f"📥 下载 {ci}.{safe_title}.md",
+                        data=results[item],
+                        file_name=f"{ci:02d}_{safe_title}.md",
+                        mime="text/markdown",
+                        key=f"dl_split_{ci}",
+                    )
+                else:
+                    # 未生成，流式生成这一章
+                    st.info(f"📋 生成第 {ci}/{n} 章：{item}（详细程度：{detail}）…")
+                    with st.chat_message("assistant"):
+                        placeholder = st.empty()
+                        part = ""
+                        for event in learn_notes(
+                            selected_ids, st.session_state.learn_thread_id,
+                            outline=item, detail_level=detail, focus=focus,
+                        ):
+                            t = event.get("type")
+                            if t == "token":
+                                part += event.get("content", "")
+                                placeholder.markdown(part + "▌")
+                            elif t == "done":
+                                placeholder.markdown(part)
+                            elif t == "error":
+                                placeholder.error(f"错误：{event.get('msg')}")
+                    results[item] = part
+                    st.rerun()  # 生成完一章后重跑，展示 + 继续下一章
+
+        if st.button("✏️ 回去改大纲", key="notes_back_to_outline"):
             # 改大纲后清掉旧结果，确保重新生成
             st.session_state.pop("notes_result", None)
+            st.session_state.pop("notes_split_results", None)
             st.session_state["notes_step"] = 2
             st.rerun()
 
 
 # ── Tab 6: PPT 生成（分步向导：配置→大纲→生成，Marp 格式）──
 with tab_slides:
-    st.caption("📽️ 基于**全文**生成 Marp PPT。先选主题/页数出大纲，你确认后再生成。")
-    with st.expander("❓ 如何把 Marp Markdown 变成 PPT？"):
-        st.markdown("""
-        **方法 1（推荐）：VS Code + Marp 插件**
-        1. 安装 VS Code 扩展 **Marp for VS Code**
-        2. 打开下载的 `.md` 文件
-        3. 点击右上角「导出」按钮，选择 PDF / PPTX / HTML
-
-        **方法 2：命令行**
-        `npx @marp-team/marp-cli@latest 文件.md -o 输出.pptx`
-
-        **方法 3：Marp Web**
-        粘贴到 [marp.app](https://marp.app/) 在线预览和导出
-        """)
+    st.caption("📽️ 基于**全文**生成 Marp PPT。先选主题/页数出大纲，你确认后再生成。下载后可一键转 PPTX。")
     step = st.session_state.get("slides_step", 1)
 
     # Step 1：配置 + 生成大纲
@@ -691,8 +793,23 @@ with tab_slides:
                 file_name=f"PPT_{'_'.join(selected_titles)[:30]}.md",
                 mime="text/markdown",
             )
-            st.info("💡 下载后用 VS Code Marp 插件预览/导出为 PPTX（见上方说明）")
-        if st.button("✏️ 回去改大纲"):
+            with st.expander("🎬 如何把这个 Markdown 转成 PPT / PDF？"):
+                st.markdown("""
+                **方法 1（推荐）：VS Code + Marp 插件**
+                1. 安装 VS Code 扩展 **Marp for VS Code**
+                2. 打开下载的 `.md` 文件
+                3. 点右上角「导出」按钮 → 选 PDF / PPTX / HTML
+
+                **方法 2：命令行（一行搞定）**
+                ```
+                npx @marp-team/marp-cli@latest 下载的文件.md -o 输出.pptx
+                ```
+                > 首次运行会自动下载 marp-cli，约 30-60 秒，之后很快。
+
+                **方法 3：在线预览**
+                粘贴到 [marp.app](https://marp.app/) 在线预览和导出
+                """)
+        if st.button("✏️ 回去改大纲", key="slides_back_to_outline"):
             st.session_state.pop("slides_result", None)
             st.session_state["slides_step"] = 2
             st.rerun()

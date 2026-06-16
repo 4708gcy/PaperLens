@@ -1,6 +1,6 @@
 # 📄 PaperLens — 论文与课件学习智能体
 
-> 基于 **LangGraph 多分支 Agent** 的学习助手：上传论文 / 课件（PDF/DOCX/PPTX/图片）→ LibreOffice 转 PDF → MinerU 解析为 Markdown + MiMo 理解图表 → 两条数据通路：**论文精读走 ES 检索（BM25+KNN+RRF+Rerank）**，**学习助手走全文通读**（辅导问答 / 要点总结 / 知识卡片 / 自测练习 / 复习笔记 / PPT 生成）。
+> 基于 **LangGraph 多分支 Agent** 的学习助手：上传论文 / 课件（PDF/DOCX/PPTX/图片）→ LibreOffice 转 PDF → MinerU 解析为 Markdown + qwen3.7-plus 视觉理解图表 → 两条数据通路：**论文精读走 ES 检索（BM25+KNN+RRF+Rerank）**，**学习助手走全文通读**（辅导问答 / 要点总结 / 知识卡片 / 自测练习 / 复习笔记 / PPT 生成）。
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.136-green)
@@ -13,18 +13,19 @@
 - **💬 论文精读问答**：针对单篇论文深度多轮问答（流式响应 + 引用追溯）
 - **🔍 结构化解读**：一键生成论文 5 段式解读（研究背景 / 核心方法 / 主要贡献 / 实验结论 / 局限展望）
 - **📝 多篇综述**：跨多篇论文自动规划大纲 → **Send 并行检索写作** → 合并综述报告
+- **🔎 综合问答**：跨多文档 ES 检索，在大量资料里定位/对比某主题（适合"哪些资料讲过 X"）
 
 ### 🎓 学习助手（全文通读通路）
 - **📖 辅导问答**：苏格拉底式讲解，基于全文答 + 反问引导
 - **📋 要点总结**：通读全文生成结构化大纲摘要
 - **🗂️ 知识卡片**：抽取核心概念生成 Anki 风格闪卡（JSON，可下载）
 - **📝 自测练习**：基于全文出选择题并可交互作答（JSON，可下载）
-- **📒 复习笔记**：分步向导（配置→大纲→你编辑→生成），知识框架 + 易错点 + 记忆口诀
-- **📽️ PPT 生成**：分步向导（选主题/页数→大纲→你编辑→生成），Marp 格式可一键导出 PPT
+- **📒 复习笔记**：分步向导（配置→大纲→你编辑→生成），支持单文件/分章节两种模式
+- **📽️ PPT 生成**：分步向导（选主题/页数→大纲→你编辑→生成），Marp 格式 Markdown
 
 ### 📎 通用能力
 - **多格式输入**：PDF / DOC / DOCX / PPT / PPTX / 图片，非 PDF 自动经 LibreOffice 转 PDF
-- **图表理解**：MiMo-v2-omni 给每张图表生成文字描述，补进 markdown 全文 + 进 ES 索引
+- **图表理解**：qwen3.7-plus 的视觉能力给每张图表生成文字描述，补进 markdown 全文 + 进 ES 索引
 - **多文档综合**：学习助手支持一次选多篇课件，综合跨资料学习
 
 ## 🏗️ 系统架构
@@ -32,7 +33,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                 Streamlit 前端 (8501)                        │
-│  论文管理 │ 论文精读 │ 结构化解读 │ 多篇综述 │ 学习助手(6模式) │
+│  论文管理 │ 论文精读 │ 结构化解读 │ 多篇综述 │ 学习助手(6模式) │ 综合问答 │
 └─────────────────────────┬───────────────────────────────────┘
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -45,7 +46,7 @@
 │  │             ↓              读全文markdown                ││
 │  │      qa/analyze/Send并行                                ││
 │  └─────────────────────────────────────────────────────────┘│
-│  DocumentService: LibreOffice → MinerU → MiMo图表 → 分块     │
+│  DocumentService: LibreOffice → MinerU → qwen3.7-plus图表 → 分块   │
 │  LearnRouter: /learn/outline 大纲生成（分步向导）             │
 └─────────────────────────┬───────────────────────────────────┘
                           ▼
@@ -53,8 +54,8 @@
         ▼                                   ▼
 ┌───────────────────┐             ┌─────────────────────┐
 │  Elasticsearch    │             │  Qwen3.7-plus       │
-│  论文精读/解读/综述 │             │  + MiMo-v2-omni     │
-│  BM25+KNN+Rerank  │             │  (思考模式可配置)    │
+│  论文精读/解读/综述 │             │  (文本+图表理解)     │
+│  BM25+KNN+Rerank  │             │  思考模式可配置      │
 └───────────────────┘             └─────────────────────┘
 ```
 
@@ -92,7 +93,7 @@
 - **MinerU**：`mineru-open-api`（首次 extract 模式需 `mineru-open-api auth`）
 - **LibreOffice**：`soffice` 命令（非 PDF 转 PDF）
 - **BGE 模型**：本地路径 `E:/ai八斗学院学习/models/BAAI/bge-m3` + `bge-reranker-v2-m3`
-- **API Keys**：DashScope（Qwen3.7-plus）+ 小米 MiMo
+- **API Keys**：DashScope（Qwen3.7-plus，文本+图表理解，一个 Key 即可）
 
 ## 🚀 快速启动
 
@@ -105,7 +106,7 @@ cd E:\elasticsearch-9.3.1\elasticsearch-9.3.1
 ./bin/elasticsearch
 
 # 2. 配置密钥
-cp .env.example .env  # 填 DASHSCOPE_API_KEY, MIMO_API_KEY
+cp .env.example .env  # 填 DASHSCOPE_API_KEY
 
 # 3. 启动后端
 cd E:\其他\大模型项目\PaperLens
@@ -134,23 +135,23 @@ PaperLens/
 │   │   ├── embedding.py     # BGE-m3 单例
 │   │   ├── reranker.py      # BGE-reranker-v2-m3
 │   │   ├── rag_engine.py    # BM25+KNN+RRF+Rerank
-│   │   └── multimodal.py    # MiMo-v2-omni 图表理解
+│   │   └── multimodal.py    # qwen3.7-plus 图表理解（视觉能力）
 │   ├── agents/
 │   │   ├── state.py         # LangGraph 状态（含 learn_outline/config）
 │   │   ├── prompts.py       # 集中 Prompt（含学习助手6模式 + 大纲提示词）
-│   │   └── graph.py         # StateGraph（triage→4分支，learn直达全文）
+│   │   └── graph.py         # StateGraph（triage→多路由：检索/全文/综述/学习助手）
 │   ├── routers/
 │   │   ├── documents.py     # 上传/列表/删除 + 获取全文markdown API
 │   │   ├── chat.py          # 对话 + SSE 流式
-│   │   └── learn.py         # 学习助手大纲生成接口
+│   │   └── learn.py         # 学习助手大纲生成 + PPT导出接口
 │   ├── services/
-│   │   └── document_service.py  # MinerU→MiMo→图片描述补全文→分块→索引
+│   │   └── document_service.py  # MinerU→qwen3.7-plus图表理解→描述补全文→分块→索引
 │   └── models/orm.py        # SQLAlchemy ORM
 ├── scripts/
 │   └── rebuild.py           # 重建所有文档（新管线重跑）
 ├── eval/                    # 评测脚本 + 数据集 + 结果
 ├── tests/                   # pytest 测试（graph路由/chunker/rag_engine/retrieve/synthesize）
-├── frontend/                # Streamlit 5 页面
+├── frontend/                # Streamlit 6 页面
 ├── config.yaml              # 配置（含 enable_thinking / max_images_per_dir）
 ├── .env.example / requirements.txt
 └── start_backend.bat        # Windows 启动脚本（ocr 环境）
@@ -158,7 +159,7 @@ PaperLens/
 
 ## 🛠️ 技术栈
 
-LangGraph · FastAPI · Elasticsearch · Streamlit · BGE-m3 · BGE-reranker-v2-m3 · mineru-open-api · LibreOffice · MiMo-v2-omni · Qwen3.7-plus · SQLite · pytest
+LangGraph · FastAPI · Elasticsearch · Streamlit · BGE-m3 · BGE-reranker-v2-m3 · mineru-open-api · LibreOffice · Qwen3.7-plus（文本+视觉）· SQLite · pytest
 
 ## 🧪 测试
 
@@ -171,7 +172,7 @@ python -m pytest tests/test_graph.py -v
 ## 📝 关键工程决策
 
 1. **两条数据通路**：论文精读走 ES top-k 检索（长文档精准局部问答），学习助手走全文通读（笔记/PPT/总结需全局视野）。learn 意图直达 learn_agent，跳过冗余的 ES 检索。
-2. **图表理解补进全文**：MiMo 给每张图生成描述，既写进 markdown 全文（供学习助手理解图表），又作为独立 ES chunk（供检索命中），图片不再"隐形"。
+2. **图表理解补进全文**：qwen3.7-plus 的视觉能力给每张图生成描述，既写进 markdown 全文（供学习助手理解图表），又作为独立 ES chunk（供检索命中），图片不再"隐形"。
 3. **分步向导生成**：笔记和 PPT 不是黑箱——先生成大纲让用户编辑确认，再按确认的大纲生成成品，全程 `session_state` 持久化，点控件不会丢内容。
 4. **思考模式可配置**：qwen3.7-plus 是混合思考模型，`config.yaml` 的 `enable_thinking` 控制开关（true 质量高但首 token 慢，false 快）。
 5. **多文档全文防爆**：学习助手支持多选，`_load_full_markdown` 对超长情况按篇均摊截断（每篇留头尾），保证每篇都能被看到。

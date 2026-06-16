@@ -6,7 +6,7 @@
 
 **PaperLens — 论文与课件学习智能体** | 个人独立项目 | LangGraph · FastAPI · Elasticsearch · Streamlit
 
-- 设计并实现面向学习/科研场景的智能体，覆盖**两条数据通路**：论文精读/结构化解读/多篇综述走 **ES 多路召回 RAG**（BM25+BGE-m3+RRF+Cross-Encoder 重排），学习助手 6 种模式（辅导问答/要点总结/知识卡片/自测练习/复习笔记/PPT 生成）走**全文通读**。支持 PDF/DOCX/PPTX 多格式（LibreOffice 转 PDF → MinerU 解析 → MiMo-v2-omni 图表理解，描述补进全文+索引）。
+- 设计并实现面向学习/科研场景的智能体，覆盖**两条数据通路**：论文精读/结构化解读/多篇综述/综合问答走 **ES 多路召回 RAG**（BM25+BGE-m3+RRF+Cross-Encoder 重排），学习助手 6 种模式（辅导问答/要点总结/知识卡片/自测练习/复习笔记/PPT 生成）走**全文通读**。支持 PDF/DOCX/PPTX 多格式（LibreOffice 转 PDF → MinerU 解析 → qwen3.7-plus 视觉理解图表，描述补进全文+索引）。
 - 基于 **LangGraph** 构建多分支 Agent 图：意图分类后 learn 直达全文 agent（跳过冗余检索），synthesize 用 **Send API** 章节级并行（5 章并行写作，比串行快 3 倍）；笔记/PPT 采用**分步向导**（生成大纲→用户编辑→按确认大纲生成），全程 session_state 持久化。
 - 构建多路召回 RAG 引擎（BM25 + BGE-m3 向量 + RRF + Cross-Encoder 重排序），自建 60 条问答评测集对比 4 种检索策略，发现中英跨语言场景纯向量（MRR 0.70）优于 BM25+向量混合（MRR 0.47），LLM-as-Judge 验证 RAG 提升答案质量 +68.4%。
 - 工程化：FastAPI 分层架构 + SQLite/ES 双库 + 全局异常 + 13 个 pytest 测试 + 环境自检（mineru/soffice 可用性），独立解决工程难题（ES 9.x 兼容、思考模型流式静默期、Windows 后台线程 PATH 缺失等）。
@@ -15,7 +15,7 @@
 
 **PaperLens — 论文与课件学习智能体** | LangGraph · FastAPI · Elasticsearch · BGE-m3
 
-- 基于 LangGraph 多分支 Agent 实现论文精读问答、结构化解读、多篇综述（Send API 并行）；并扩展为学习助手（辅导问答/闪卡/自测/复习笔记/PPT 分步向导），区分两条通路：RAG 检索（论文精读）与全文通读（学习助手），支持 PDF/DOCX/PPTX 多格式 + MiMo 多模态图表理解。
+- 基于 LangGraph 多分支 Agent 实现论文精读问答、结构化解读、多篇综述（Send API 并行）；并扩展为学习助手（辅导问答/闪卡/自测/复习笔记/PPT 分步向导），区分两条通路：RAG 检索（论文精读）与全文通读（学习助手），支持 PDF/DOCX/PPTX 多格式 + qwen3.7-plus 视觉图表理解（一个模型搞定文本+多模态）。
 - 构建多路召回 RAG 引擎（BM25+向量+RRF+Cross-Encoder 重排序），自建 60 条评测集，4 策略对比发现跨语言场景纯向量 MRR 0.70 优于混合 0.47，LLM-as-Judge 验证 RAG 提升答案质量 +68.4%。
 - FastAPI 分层架构 + SSE 流式 + checkpointer 多轮记忆 + 思考模式可配置 + 多文档全文截断保护 + 13 个 pytest 测试，独立解决 ES 9.x 兼容、思考模型流式、Windows PATH 等工程难题。
 
@@ -37,7 +37,7 @@
 
 ### 讲图表理解补全文（工程深度）
 
-> "MinerU 解析 PDF 会提取图片，但有个问题：markdown 里只有图片路径，LLM 读全文时根本不知道图表画了什么。我用 MiMo-v2-omni 给每张图生成文字描述，然后**补进 markdown 全文末尾**——这样学习助手读全文时能真正理解图表。同时这些描述也作为独立的 image_caption chunk 进 ES，检索也能命中。论文3 之前一张图描述都没有，现在有 16 条。"
+> "MinerU 解析 PDF 会提取图片，但有个问题：markdown 里只有图片路径，LLM 读全文时根本不知道图表画了什么。我用 **qwen3.7-plus 的视觉能力**给每张图生成文字描述，然后**补进 markdown 全文末尾**——这样学习助手读全文时能真正理解图表。同时这些描述也作为独立的 image_caption chunk 进 ES，检索也能命中。论文3 之前一张图描述都没有，现在有 16 条。而且复用主力模型，不用再单独维护一个多模态服务。"
 
 ### 讲思考模型流式坑（Debug 能力）
 
@@ -65,7 +65,7 @@
 
 | 指标 | 数值 |
 |------|------|
-| 功能覆盖 | 论文精读/解读/综述 + 学习助手6模式 |
+| 功能覆盖 | 论文精读/解读/综述/综合问答 + 学习助手6模式（共 6 页面） |
 | 数据通路 | 2 条（ES 检索 / 全文通读） |
 | 评测集规模 | 60 条问答对（2 篇论文） |
 | 纯向量 MRR | 0.70（最优单策略） |

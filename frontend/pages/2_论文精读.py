@@ -57,6 +57,20 @@ with st.sidebar:
     st.caption("- 💡 概念解释")
     st.caption("- 🔗 多篇综述（需多篇论文）")
 
+# 聊天状态
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# 切换论文时重置对话（换论文 = 换新对话上下文）
+# 必须在显示之前执行 + st.rerun，否则右侧还停留在旧论文的对话上
+if st.session_state.get("last_paper_id") != selected_id:
+    old = st.session_state.get("last_paper_id")
+    st.session_state.last_paper_id = selected_id
+    st.session_state.messages = []
+    st.session_state.thread_id = f"paper_{selected_id}_{int(time.time())}"
+    st.toast(f"已切换到论文 [{selected_id}]，对话已重置（原 {old}）", icon="🔄")
+    st.rerun()
+
 # 主区域顶部：显示当前选中论文信息
 selected_paper = next((p for p in indexed_papers if p["paper_id"] == selected_id), None)
 if selected_paper:
@@ -67,28 +81,44 @@ if selected_paper:
         f"在左侧切换论文"
     )
 
-# 聊天状态
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# 图片上传区（多模态：qwen3.7-plus 可看图）—— 顶层调用，不包 with
+import base64
 
-# 切换论文时重置对话（换论文 = 换新对话上下文）
-if st.session_state.get("last_paper_id") != selected_id:
-    st.session_state.last_paper_id = selected_id
-    st.session_state.messages = []
-    st.session_state.thread_id = f"paper_{selected_id}_{int(time.time())}"
+def _encode_image_to_data_url(uploaded) -> str:
+    """把 Streamlit UploadedFile 转成 data URL（base64），供 qwen3.7-plus 视觉输入。"""
+    raw = uploaded.getvalue()
+    ext = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else "jpeg"
+    mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png",
+            "webp": "webp", "gif": "gif", "bmp": "bmp"}.get(ext, "jpeg")
+    b64 = base64.b64encode(raw).decode()
+    return f"data:image/{mime};base64,{b64}"
+
+uploaded_images = st.file_uploader(
+    "📎 上传图片提问（可选，qwen3.7-plus 会看图）",
+    type=["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+    accept_multiple_files=True,
+    key="read_img_uploader",
+)
+pending_images = [_encode_image_to_data_url(img) for img in (uploaded_images or [])]
 
 # 显示历史
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        for img_url in msg.get("images", []):
+            st.image(img_url, width=200)
         if msg.get("intent"):
             st.caption(f"🎯 意图：{msg['intent']}")
 
 # 接收输入
-if prompt := st.chat_input("输入你的问题..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+if prompt := st.chat_input("输入你的问题...（上方可附图）"):
+    st.session_state.messages.append({
+        "role": "user", "content": prompt, "images": pending_images
+    })
     with st.chat_message("user"):
         st.markdown(prompt)
+        for img_url in pending_images:
+            st.image(img_url, width=200)
 
     with st.chat_message("assistant"):
         if use_stream:
@@ -96,7 +126,8 @@ if prompt := st.chat_input("输入你的问题..."):
             full_response = ""
             detected_intent = ""
 
-            for event in chat_stream(prompt, [selected_id], st.session_state.thread_id):
+            for event in chat_stream(prompt, [selected_id], st.session_state.thread_id,
+                                      images=pending_images or None):
                 if event.get("type") == "intent":
                     detected_intent = event.get("intent", "")
                 elif event.get("type") == "token":
@@ -113,7 +144,8 @@ if prompt := st.chat_input("输入你的问题..."):
                 st.caption(f"🎯 意图：{detected_intent}")
         else:
             with st.spinner("思考中..."):
-                result = chat(prompt, [selected_id], st.session_state.thread_id)
+                result = chat(prompt, [selected_id], st.session_state.thread_id,
+                              images=pending_images or None)
             full_response = result.get("data", {}).get("reply", "出错了")
             detected_intent = result.get("data", {}).get("intent", "")
             st.markdown(full_response)

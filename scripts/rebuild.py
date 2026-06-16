@@ -2,8 +2,8 @@
 
 对每篇已上传的文档：
 1. 从数据库读 file_path（原始上传文件）
-2. 重新跑 document_service.process_document（MinerU + MiMo + 新的图片补全 + ES 索引）
-   - 不删旧的 ES 索引：process_document 内部会先删再建（见 rag_engine.index_chunks）
+2. 重新跑 document_service.process_document（MinerU + qwen3.7-plus 图片理解 + 新的图片补全 + ES 索引）
+   - 重建前先调 rag_engine.delete_index 清掉旧 ES 索引，避免 chunk 重复堆积
 3. 更新数据库状态
 
 用法（必须在 ocr 环境）：
@@ -11,7 +11,7 @@
     conda run -n ocr python scripts/rebuild.py --paper-ids 1 3   # 只重建指定 id
     conda run -n ocr python scripts/rebuild.py --dry-run         # 只打印不执行
 
-注意：会重新调用 MinerU（每篇几十秒~几分钟）和 MiMo 图片理解（每张几秒）。
+注意：会重新调用 MinerU（每篇几十秒~几分钟）和 qwen3.7-plus 图片理解（每张几秒）。
 """
 import argparse
 import os
@@ -59,7 +59,7 @@ def main():
         print("\n--dry-run：仅列出，不执行。")
         return
 
-    print("\n开始重建（会重新跑 MinerU + MiMo，请耐心等待）...\n")
+    print("\n开始重建（会重新跑 MinerU + qwen3.7-plus 图片理解，请耐心等待）...\n")
     success, failed = 0, 0
     for p in papers:
         paper_id = p.paper_id
