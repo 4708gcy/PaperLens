@@ -9,7 +9,7 @@
 - 设计并实现面向科研场景的论文研究 Agent，支持单论文精读问答、结构化解读、跨多篇论文综述，所有结论可追溯引用来源；支持 PDF/DOCX/PPTX 多格式输入（LibreOffice 转 PDF → mineru-open-api 解析 → MiMo-v2-omni 图表理解）。
 - 基于 **LangGraph** 构建多分支 Agent 图（意图分类→检索→专业分支），综述模块用 **Send API** 实现章节级并行（5 章并行写作，比串行快 3 倍）；集成 checkpointer 多轮记忆 + SSE 流式响应。
 - 构建多路召回 RAG 引擎（BM25 + BGE-m3 向量 + RRF + Cross-Encoder 重排序），自建 60 条问答评测集对比 4 种检索策略，发现中英跨语言场景纯向量（MRR 0.70）优于 BM25+向量混合（MRR 0.47），LLM-as-Judge 验证 RAG 提升答案质量 +68.4%。
-- 工程化：FastAPI 分层架构 + SQLite/ES 双库 + 全局异常 + 16 个 pytest 测试 + 环境自检（mineru/soffice 可用性），独立解决 8 个工程难题（ES 9.x 兼容、torch<2.6 bin 加载限制、Windows 后台线程 PATH 缺失等）。
+- 工程化：FastAPI 分层架构 + SQLite/ES 双库 + 全局异常 + 18 个 pytest 测试 + 环境自检（mineru/soffice 可用性），独立解决 8 个工程难题（ES 9.x 兼容、torch<2.6 bin 加载限制、Windows 后台线程 PATH 缺失等）。
 
 ### 版本 B（精简版，3 行）
 
@@ -17,7 +17,7 @@
 
 - 基于 LangGraph 多分支 Agent 实现论文精读问答、5 段结构化解读、多篇综述（Send API 并行），集成 MinerU 文档解析 + MiMo 多模态图表理解，支持 PDF/DOCX/PPTX 多格式。
 - 构建多路召回 RAG 引擎（BM25+向量+RRF+Cross-Encoder 重排序），自建 60 条评测集，4 策略对比发现跨语言场景纯向量 MRR 0.70 优于混合 0.47，LLM-as-Judge 验证 RAG 提升答案质量 +68.4%。
-- FastAPI 分层架构 + SSE 流式 + checkpointer 多轮记忆 + 16 个 pytest 测试，独立解决 ES 9.x 兼容、torch<2.6 限制、Windows PATH 等 8 个工程难题。
+- FastAPI 分层架构 + SSE 流式 + checkpointer 多轮记忆 + 18 个 pytest 测试，独立解决 ES 9.x 兼容、torch<2.6 限制、Windows PATH 等 8 个工程难题。
 
 ---
 
@@ -54,7 +54,7 @@
 | +Reranker MRR | 0.72 |
 | 答案质量提升 | 2.38 → 4.00（+68.4%） |
 | 综述并行加速 | 5 章 30s（串行需 90s） |
-| 测试覆盖 | 16 个 pytest |
+| 测试覆盖 | 18 个 pytest |
 | 代码量 | 4500+ 行 |
 | 解决的工程难题 | 8 个 |
 

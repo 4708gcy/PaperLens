@@ -1,4 +1,5 @@
 """论文精读页面 —— 单论文多轮问答 + 流式"""
+import time
 import streamlit as st
 import sys
 from pathlib import Path
@@ -28,22 +29,53 @@ with st.sidebar:
     use_stream = st.toggle("流式输出", value=True, help="逐字显示 AI 回复")
 
     st.divider()
+    # ── 对话管理：新建 / 清空 ──
+    # thread_id 默认带时间戳，保证「新建对话」后历史不串、checkpointer 不复用旧上下文
+    if "thread_id" not in st.session_state:
+        st.session_state.thread_id = f"paper_{selected_id}_{int(time.time())}"
+
+    col_new, col_clear = st.columns(2)
+    with col_new:
+        if st.button("🆕 新建对话", use_container_width=True,
+                     help="开一个全新对话（清空当前显示，并换一个新的对话上下文，不再记住之前内容）"):
+            st.session_state.messages = []
+            st.session_state.thread_id = f"paper_{selected_id}_{int(time.time())}"
+            st.toast("已开启新对话", icon="🆕")
+            st.rerun()
+    with col_clear:
+        if st.button("🗑️ 清空显示", use_container_width=True,
+                     help="只清空当前页面的对话显示，不改对话上下文（下次提问仍可记住上文）"):
+            st.session_state.messages = []
+            st.toast("已清空显示", icon="🗑️")
+            st.rerun()
+
+    st.caption(f"当前对话ID：`{st.session_state.thread_id}`")
+
+    st.divider()
     st.caption("🎯 AI 会自动识别你的意图：")
     st.caption("- 📖 知识问答（基于论文内容回答）")
     st.caption("- 💡 概念解释")
     st.caption("- 🔗 多篇综述（需多篇论文）")
 
+# 主区域顶部：显示当前选中论文信息
+selected_paper = next((p for p in indexed_papers if p["paper_id"] == selected_id), None)
+if selected_paper:
+    st.info(
+        f"📄 **当前论文**：[{selected_paper['paper_id']}] {selected_paper['title']}　|　"
+        f"{selected_paper.get('page_count', 0)} 页　|　"
+        f"{selected_paper.get('chunk_count', 0)} 个语义块　|　"
+        f"在左侧切换论文"
+    )
+
 # 聊天状态
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = f"paper_{selected_id}"
 
-# 切换论文时重置对话
+# 切换论文时重置对话（换论文 = 换新对话上下文）
 if st.session_state.get("last_paper_id") != selected_id:
     st.session_state.last_paper_id = selected_id
     st.session_state.messages = []
-    st.session_state.thread_id = f"paper_{selected_id}"
+    st.session_state.thread_id = f"paper_{selected_id}_{int(time.time())}"
 
 # 显示历史
 for msg in st.session_state.messages:

@@ -19,12 +19,15 @@ class PaperLensState(TypedDict):
     """
     # 对话历史（reducer 追加，不覆盖）
     messages: Annotated[list[BaseMessage], operator.add]
-    # 意图分类结果：qa / analyze / synthesize / general
+    # 意图分类结果：qa / analyze / synthesize / general / learn
     intent: str
     # RAG 检索到的上下文文本
     context: str
     # 目标论文 ID 列表（单论文传 1 个，综述传多个）
     paper_ids: List[int]
+    # 学习助手模式："" / "qa" / "summary" / "flashcard" / "quiz"
+    # 非空时 triage 直接走 learn 意图，retrieve 后由 learn_agent 处理
+    learn_mode: str
     # 综述主题（仅 synthesize 用）
     topic: str
     # 综述章节（Send 并行 reduce，Phase 3 用）

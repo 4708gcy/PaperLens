@@ -195,6 +195,12 @@ class RAGEngine:
         fused = self._rrf_fusion(bm25_results, vector_results)
 
         if not fused:
+            # BM25 + 向量都为空：通常是查询与文档完全无关，或索引未就绪
+            logger.warning(
+                f"检索结果为空（BM25={len(bm25_results)} 向量={len(vector_results)}），"
+                f"query='{query[:40]}' paper_ids={paper_ids}。"
+                f"请确认文档已 indexed 且查询与文档相关。"
+            )
             return []
 
         # 取前 rerank_candidates 个做精排

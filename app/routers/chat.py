@@ -43,6 +43,7 @@ def _build_input_state(request: ChatRequest) -> dict:
         "sections": [],
         "outline": [],
         "final_report": "",
+        "learn_mode": request.learn_mode or "",
     }
 
 

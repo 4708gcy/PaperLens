@@ -15,6 +15,8 @@ class ChatRequest(BaseModel):
     message: str
     paper_ids: List[int] = []
     thread_id: str = "default"
+    # 学习助手模式：留空走论文精读；qa/summary/flashcard/quiz 走学习辅导
+    learn_mode: str = ""
 
 
 class AnalyzeRequest(BaseModel):

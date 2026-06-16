@@ -8,10 +8,15 @@ app:
 llm:
   api_key: ${DASHSCOPE_API_KEY}
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  model: "qwen-plus"
-  fast_model: "qwen-turbo"
+  # 主力模型（回答/解读/综述/学习辅导）：性价比高、输出稳定、同音错字少
+  # 可用 model name 见百炼「选择模型」：https://help.aliyun.com/zh/model-studio/models
+  model: "qwen3.7-plus"
+  fast_model: "qwen-turbo"       # 快速模型（仅意图分类等辅助任务），省钱
   temperature: 0.7
   max_tokens: 4096
+  # qwen3.7-plus 是混合思考模型：true 时先思考再答（质量高、但流式首 token 慢 ~45s）；
+  # false 时直接回答（首 token ~1s）。默认开启以获得更好的回答质量。
+  enable_thinking: true
 
 mimo:
   api_key: ${MIMO_API_KEY}

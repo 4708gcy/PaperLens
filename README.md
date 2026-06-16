@@ -134,7 +134,7 @@ PaperLens/
 │   ├── eval_answer.py       # LLM-as-Judge
 │   ├── dataset.json         # 60 条问答对
 │   └── results_chart.png    # 对比图
-├── tests/                   # 16 个测试（chunker/rag_engine/graph）
+├── tests/                   # 18 个 pytest 测试（chunker/rag_engine/graph 路由）
 ├── frontend/                # Streamlit 4 页面
 ├── config.yaml / .env.example / requirements.txt
 └── start_backend.bat        # Windows 启动脚本
@@ -149,7 +149,7 @@ LangGraph · FastAPI · Elasticsearch · Streamlit · BGE-m3 · BGE-reranker-v2-
 ```bash
 conda activate ocr
 python -m pytest tests/ -v
-# 16 passed
+# 18 passed（chunker 2 + rag_engine 5 + graph 路由 11）
 ```
 
 ## 📝 关键工程决策

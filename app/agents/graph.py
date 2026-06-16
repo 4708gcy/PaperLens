@@ -36,14 +36,25 @@ from app.config import settings
 from app.agents.state import PaperLensState
 from app.agents.prompts import (
     TRIAGE_SYSTEM, QA_SYSTEM, ANALYZE_SYSTEM, GENERAL_SYSTEM,
-    SYNTHESIZE_PLANNER_SYSTEM, SECTION_WRITER_SYSTEM, ASSEMBLER_SYSTEM
+    SYNTHESIZE_PLANNER_SYSTEM, SECTION_WRITER_SYSTEM, ASSEMBLER_SYSTEM,
+    LEARN_QA_SYSTEM, LEARN_SUMMARY_SYSTEM, LEARN_FLASHCARD_SYSTEM, LEARN_QUIZ_SYSTEM,
+    LEARN_NOTES_SYSTEM, LEARN_SLIDES_SYSTEM,
 )
 from app.logger import logger
 
 
 # ── LLM 实例 ──
 def _make_llm(temperature: float = 0.7, model: str = None) -> ChatOpenAI:
-    """创建 LLM 实例（OpenAI 兼容协议调 Qwen，含 retry 应对 QPS 限流）"""
+    """创建 LLM 实例（OpenAI 兼容协议调 Qwen，含 retry 应对 QPS 限流）
+
+    qwen3.7-plus 是「混合思考模型」：
+    - enable_thinking=true：先输出 reasoning_content（content 为空），再输出正式回答。
+      质量更高，但流式首 token 要等 ~45s（思考静默期）。
+    - enable_thinking=false：立即以 content 流式输出，首 token ~1s，但回答不经过深思。
+    开关由 config.yaml 的 llm.enable_thinking 控制，默认 true（重质量）。
+    见 https://www.alibabacloud.com/help/en/model-studio/deep-thinking
+    """
+    enable_thinking = bool(settings["llm"].get("enable_thinking", True))
     return ChatOpenAI(
         api_key=settings["llm"]["api_key"],
         base_url=settings["llm"]["base_url"],
@@ -52,6 +63,9 @@ def _make_llm(temperature: float = 0.7, model: str = None) -> ChatOpenAI:
         max_tokens=settings["llm"]["max_tokens"],
         max_retries=5,  # 自动重试（应对 Send 并发触发 QPS 限流）
         timeout=60,
+        # 思考模式开关：DashScope OpenAI 兼容接口用 extra_body 传 enable_thinking
+        # （官方建议用 extra_body 而非 model_kwargs 传非标准参数）
+        extra_body={"enable_thinking": enable_thinking},
     )
 
 
@@ -69,34 +83,59 @@ def triage_node(state: PaperLensState) -> dict:
     """
     意图分类节点：只分类，不回答。
 
-    为什么用独立的轻量模型做分类？
-    — 分类是简单任务，用 qwen-turbo 省钱
-    — 分离后每个 Agent 的 Prompt 更聚焦，表现更好
+    分类策略（规则优先，LLM 兜底）：
+    0. 学习模式（learn_mode 非空）→ learn（学习助手页直接指定模式）
+    1. 没选论文 → general（闲聊）
+    2. 选了论文 + 明确闲聊词（你好/谢谢/你是谁） → general
+    3. 选了论文 + 含"分析/解读/综述"关键词 → analyze/synthesize
+    4. 选了论文 + 含"根据已上传/这篇文章/列出内容"等指向已选文档的词 → qa（强制走 RAG）
+    5. 选了论文 + 其他 → qa（默认走 RAG，不要让 LLM 把通用概念判成闲聊）
+
+    为什么不全用 LLM 分类？
+    — 实测"什么是 git"这种通用概念问题会被 LLM 误判为"闲聊"，
+      导致选了论文却不用 RAG，直接用 LLM 通用知识回答。
+    — 规则保证：只要选了论文，除了纯打招呼，一律走 RAG 检索。
     """
+    # 0. 学习模式优先（学习助手页直接指定 mode，无需分类）
+    if state.get("learn_mode"):
+        return {"intent": "learn"}
+
     last_message = state["messages"][-1]
     paper_ids = state.get("paper_ids", [])
     has_papers = len(paper_ids) > 0
+    msg_text = str(last_message.content).strip().lower()
 
-    # 没选论文，强制走 general
+    # 1. 没选论文，强制走 general
     if not has_papers:
         return {"intent": "general"}
 
-    response = fast_llm.invoke([
-        SystemMessage(content=TRIAGE_SYSTEM),
-        HumanMessage(content=f"用户消息：{last_message.content}")
-    ])
+    # 2. 纯闲聊词（选了论文也要允许打招呼）
+    greetings = {"你好", "hello", "hi", "谢谢", "感谢", "thanks", "thank you",
+                 "你是谁", "你能做什么", "帮助", "再见", "bye", "在吗"}
+    # 去掉标点后判断
+    msg_clean = msg_text.replace("？", "").replace("?", "").replace("！", "").replace("!", "").replace("。", "").replace(".", "").replace(",", "").replace("，", "").strip()
+    if msg_clean in greetings or len(msg_clean) <= 2:
+        return {"intent": "general"}
 
-    intent = response.content.strip().strip('"').lower()
-    valid_intents = ["qa", "analyze", "synthesize", "general"]
-    if intent not in valid_intents:
-        intent = "general"
+    # 3. 关键词识别 analyze / synthesize
+    if any(k in msg_text for k in ["综述", "对比", "比较这几篇", "跨论文"]):
+        if len(paper_ids) >= 2:
+            return {"intent": "synthesize"}
+        return {"intent": "qa"}
 
-    # synthesize 需要 ≥2 篇论文
-    if intent == "synthesize" and len(paper_ids) < 2:
-        intent = "qa"
+    if any(k in msg_text for k in ["分析", "解读", "结构化", "帮我看", "总结这篇", "梳理"]):
+        return {"intent": "analyze"}
 
-    logger.info(f"意图分类: '{str(last_message.content)[:50]}...' → {intent}")
-    return {"intent": intent}
+    # 4. 明确指向"已选文档"的提问 → 强制走 qa（避免被判成 general 说"无法访问文件"）
+    doc_hint_words = ["已上传", "已传", "上传的", "这篇文章", "这篇文档", "这篇论文", "这篇",
+                      "根据文章", "根据文档", "根据论文", "刚传", "列出", "列出来", "全部内容", "所有内容"]
+    if any(k in msg_text for k in doc_hint_words):
+        logger.info(f"意图分类（指向已选文档）→ qa: '{str(last_message.content)[:50]}...'")
+        return {"intent": "qa"}
+
+    # 5. 其他全部走 qa（默认用 RAG 检索论文，不闲聊）
+    logger.info(f"意图分类（规则）: '{str(last_message.content)[:50]}...' → qa")
+    return {"intent": "qa"}
 
 
 def retrieve_node(state: PaperLensState) -> dict:
@@ -163,9 +202,18 @@ def retrieve_node(state: PaperLensState) -> dict:
 
 
 def qa_node(state: PaperLensState) -> dict:
-    """知识问答节点"""
+    """
+    知识问答节点
+
+    检索为空时的兜底：在 system 里明确标注"未检索到相关内容"，
+    让模型按 QA_SYSTEM 规则 #5 诚实回应（区分"文档没讲"和"通用理解"），
+    而不是直接套用通用知识或说"无法访问文件"。
+    """
     last_msg = state["messages"][-1]
-    prompt = QA_SYSTEM.format(context=state.get("context", ""))
+    context = state.get("context", "")
+    if not context or not context.strip() or "未检索到相关论文内容" in context:
+        context = '（注意：本次未检索到该文档的相关片段。请按规则如实说明文档未提及，并可补充明确标注为「通用理解（仅供参考）」的内容。）'
+    prompt = QA_SYSTEM.format(context=context)
     response = llm.invoke([
         SystemMessage(content=prompt),
         HumanMessage(content=last_msg.content)
@@ -195,6 +243,56 @@ def general_node(state: PaperLensState) -> dict:
 
 
 # ──────────────────────────────────────────────
+# 学习助手节点（复用 retrieve 检索到的课件片段，按 mode 选 prompt）
+# ──────────────────────────────────────────────
+
+def learn_node(state: PaperLensState) -> dict:
+    """
+    学习助手节点：根据 learn_mode 选对应 prompt。
+
+    模式：
+    - qa: 苏格拉底式辅导问答
+    - summary: 整篇课件结构化大纲摘要
+    - flashcard: 知识卡片（JSON）
+    - quiz: 自测选择题（JSON）
+    - notes: 复习笔记（Markdown，知识框架+易错点+记忆口诀）
+    - slides: PPT 生成（Marp 格式 Markdown，可一键导出 PPT）
+
+    复用 retrieve_node 检索到的 context（课件片段）。
+    flashcard/quiz 不在此节点解析 JSON —— 保持原始文本流式推送，
+    由前端在 'done' 后解析（解析容错：去掉 ```json 包裹）。
+    """
+    mode = state.get("learn_mode", "qa") or "qa"
+    last_msg = state["messages"][-1]
+    context = state.get("context", "")
+
+    prompt_map = {
+        "qa": LEARN_QA_SYSTEM,
+        "summary": LEARN_SUMMARY_SYSTEM,
+        "flashcard": LEARN_FLASHCARD_SYSTEM,
+        "quiz": LEARN_QUIZ_SYSTEM,
+        "notes": LEARN_NOTES_SYSTEM,
+        "slides": LEARN_SLIDES_SYSTEM,
+    }
+    template = prompt_map.get(mode, LEARN_QA_SYSTEM)
+    prompt = template.format(context=context)
+
+    # summary/flashcard/quiz 是"一键生成"类任务：用户消息作为任务指令补充
+    # qa 模式则是正常问答
+    if mode == "qa":
+        user_content = last_msg.content
+    else:
+        user_content = f"请基于上面检索到的课件片段完成此任务。学生原始输入：{last_msg.content}"
+
+    response = llm.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=user_content)
+    ])
+    logger.info(f"学习助手完成（mode={mode}）")
+    return {"messages": [response]}
+
+
+# ──────────────────────────────────────────────
 # 路由函数
 # ──────────────────────────────────────────────
 
@@ -210,10 +308,14 @@ def route_by_intent(state: PaperLensState) -> Literal["retrieve", "general_agent
     return "general_agent"
 
 
-def route_after_retrieve(state: PaperLensState) -> Literal["qa_agent", "analyze_agent"]:
-    """检索完成后，按原始意图路由"""
+def route_after_retrieve(state: PaperLensState) -> Literal["qa_agent", "analyze_agent", "learn_agent"]:
+    """检索完成后，按原始意图路由（learn 走学习助手节点）"""
     intent = state.get("intent", "qa")
-    return "analyze_agent" if intent == "analyze" else "qa_agent"
+    if intent == "analyze":
+        return "analyze_agent"
+    if intent == "learn":
+        return "learn_agent"
+    return "qa_agent"
 
 
 # ──────────────────────────────────────────────
@@ -357,11 +459,11 @@ def assembler_node(state: PaperLensState) -> dict:
 
 
 def route_after_triage(state: PaperLensState):
-    """三路路由：triage 后根据意图分发"""
+    """三路路由：triage 后根据意图分发（qa/analyze/learn 都先去检索）"""
     intent = state.get("intent", "general")
     if intent == "synthesize":
         return "planner"
-    elif intent in ("qa", "analyze"):
+    elif intent in ("qa", "analyze", "learn"):
         return "retrieve"
     return "general_agent"
 
@@ -404,6 +506,7 @@ def build_graph():
     builder.add_node("retrieve", retrieve_node)
     builder.add_node("qa_agent", qa_node)
     builder.add_node("analyze_agent", analyze_node)
+    builder.add_node("learn_agent", learn_node)
     builder.add_node("general_agent", general_node)
     # 综述节点
     builder.add_node("planner", synthesize_planner_node)
@@ -419,10 +522,10 @@ def build_graph():
         {"retrieve": "retrieve", "planner": "planner", "general_agent": "general_agent"}
     )
 
-    # 条件边 2：retrieve → qa_agent / analyze_agent
+    # 条件边 2：retrieve → qa_agent / analyze_agent / learn_agent
     builder.add_conditional_edges(
         "retrieve", route_after_retrieve,
-        {"qa_agent": "qa_agent", "analyze_agent": "analyze_agent"}
+        {"qa_agent": "qa_agent", "analyze_agent": "analyze_agent", "learn_agent": "learn_agent"}
     )
 
     # ★ 综述：planner → Send 并行 section_worker（或兜底 assembler）
@@ -436,6 +539,7 @@ def build_graph():
     # 终止
     builder.add_edge("qa_agent", END)
     builder.add_edge("analyze_agent", END)
+    builder.add_edge("learn_agent", END)
     builder.add_edge("general_agent", END)
     builder.add_edge("assembler", END)
 

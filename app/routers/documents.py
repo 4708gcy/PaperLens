@@ -34,25 +34,50 @@ async def upload_document(
             msg=f"不支持的格式「{ext}」，支持：{', '.join(sorted(document_service.SUPPORTED_EXTENSIONS))}"
         )
 
-    # 保存上传文件 + 写入论文元信息（status=processing）
-    upload_dir = Path(settings["document"]["upload_dir"])
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    file_path = upload_dir / file.filename
-
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
+    # 先写数据库拿 paper_id（status=processing），再保存文件
+    # 顺序原因：若文件保存失败，可回滚数据库记录，避免孤儿文件
     db = Database.get_session()
     try:
         paper = Paper(
             title=Path(file.filename).stem,
-            file_path=str(file_path),
+            file_path="",  # 占位，保存文件后回填
             status="processing"
         )
         db.add(paper)
         db.commit()
         db.refresh(paper)
         paper_id = paper.paper_id
+    finally:
+        db.close()
+
+    # 保存上传文件（失败则回滚数据库记录）
+    upload_dir = Path(settings["document"]["upload_dir"])
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    file_path = upload_dir / file.filename
+
+    try:
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+    except Exception as e:
+        # 文件保存失败：回滚数据库记录，避免出现无文件的 paper 记录
+        logger.error(f"文件保存失败，回滚 paper_id={paper_id}: {e}")
+        db = Database.get_session()
+        try:
+            bad = db.query(Paper).filter(Paper.paper_id == paper_id).first()
+            if bad:
+                db.delete(bad)
+                db.commit()
+        finally:
+            db.close()
+        return APIResponse(code=500, msg=f"文件保存失败：{str(e)}")
+
+    # 回填真实文件路径
+    db = Database.get_session()
+    try:
+        paper_obj = db.query(Paper).filter(Paper.paper_id == paper_id).first()
+        if paper_obj:
+            paper_obj.file_path = str(file_path)
+            db.commit()
     finally:
         db.close()
 

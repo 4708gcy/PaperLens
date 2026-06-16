@@ -75,3 +75,78 @@ def synthesize(paper_ids: List[int], topic: str, thread_id: str = "synthesize") 
     """多篇综述（流式）"""
     message = f"请基于以下论文写一篇关于「{topic}」的综述"
     yield from chat_stream(message, paper_ids, thread_id)
+
+
+# ───────────────────────────────────────────────
+# 学习助手（复用 chat/stream，body 带 learn_mode）
+# ───────────────────────────────────────────────
+def learn_stream(
+    message: str,
+    paper_ids: List[int],
+    mode: str,
+    thread_id: str = "learn",
+) -> Generator[dict, None, None]:
+    """
+    学习助手流式对话。
+
+    mode 取值：
+    - qa       辅导式问答（chat 流式，逐字显示）
+    - summary  一键总结（流式输出 Markdown 摘要）
+    - flashcard 知识卡片（流式输出 JSON，前端在 done 后解析）
+    - quiz     自测练习（流式输出 JSON，前端在 done 后解析）
+    """
+    with httpx.Client(timeout=300) as client:
+        with client.stream(
+            "POST",
+            f"{BASE_URL}/chat/stream",
+            json={
+                "message": message,
+                "paper_ids": paper_ids,
+                "thread_id": thread_id,
+                "learn_mode": mode,
+            }
+        ) as response:
+            for line in response.iter_lines():
+                if line and line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                        yield data
+                    except json.JSONDecodeError:
+                        continue
+
+
+def _as_id_list(paper_ids):
+    """统一把单个 int 或 list 转成 list[int]，方便上层两种都能传"""
+    if isinstance(paper_ids, int):
+        return [paper_ids]
+    return list(paper_ids)
+
+
+def learn_qa(message: str, paper_ids, thread_id: str = "learn") -> Generator[dict, None, None]:
+    """学习助手 · 辅导式问答（支持多篇资料）"""
+    yield from learn_stream(message, _as_id_list(paper_ids), "qa", thread_id)
+
+
+def learn_summary(paper_ids, thread_id: str = "learn") -> Generator[dict, None, None]:
+    """学习助手 · 一键总结（支持多篇资料）"""
+    yield from learn_stream("请生成这份资料的结构化学习摘要", _as_id_list(paper_ids), "summary", thread_id)
+
+
+def learn_flashcard(paper_ids, thread_id: str = "learn") -> Generator[dict, None, None]:
+    """学习助手 · 知识卡片（支持多篇资料，返回 JSON 文本，前端解析）"""
+    yield from learn_stream("请基于这份资料生成知识闪卡", _as_id_list(paper_ids), "flashcard", thread_id)
+
+
+def learn_quiz(paper_ids, thread_id: str = "learn") -> Generator[dict, None, None]:
+    """学习助手 · 自测练习（支持多篇资料，返回 JSON 文本，前端解析）"""
+    yield from learn_stream("请基于这份资料出一份自测选择题", _as_id_list(paper_ids), "quiz", thread_id)
+
+
+def learn_notes(paper_ids, thread_id: str = "learn") -> Generator[dict, None, None]:
+    """学习助手 · 复习笔记（支持多篇资料，Markdown 流式输出）"""
+    yield from learn_stream("请基于这份资料生成一份复习笔记", _as_id_list(paper_ids), "notes", thread_id)
+
+
+def learn_slides(paper_ids, thread_id: str = "learn") -> Generator[dict, None, None]:
+    """学习助手 · PPT 生成（支持多篇资料，Marp 格式 Markdown）"""
+    yield from learn_stream("请基于这份资料生成一份 Marp 格式的 PPT", _as_id_list(paper_ids), "slides", thread_id)

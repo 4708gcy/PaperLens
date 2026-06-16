@@ -59,6 +59,7 @@ class DocumentService:
         paper_dir.mkdir(parents=True, exist_ok=True)
 
         converted_pdf_to_clean = None  # 记录 LibreOffice 生成的临时 PDF（结束清理）
+        split_parts_to_clean = []     # 记录 pypdf 拆分出的临时子 PDF（结束清理）
 
         try:
             # ── Step 1: 非 PDF → PDF（LibreOffice）──
@@ -73,6 +74,8 @@ class DocumentService:
             # ── Step 2: PDF 拆分（>200 页）──
             page_count = get_pdf_page_count(pdf_path)
             sub_files = split_pdf(pdf_path, max_pages=settings["document"]["max_pdf_pages"])
+            # 拆分产物（sub_files 里除原始 pdf_path 外的都是临时文件，结束后清理）
+            split_parts_to_clean = [p for p in sub_files if p != pdf_path]
             logger.info(f"PDF {input_path.name}（{page_count} 页）→ {len(sub_files)} 份")
 
             # ── Step 3: mineru-open-api extract 转 Markdown ──
@@ -177,6 +180,13 @@ class DocumentService:
             if converted_pdf_to_clean and Path(converted_pdf_to_clean).exists():
                 try:
                     os.remove(converted_pdf_to_clean)
+                except Exception:
+                    pass
+            # 清理 pypdf 拆分出的临时子 PDF（仅 >200 页的大论文会产生）
+            for part in split_parts_to_clean:
+                try:
+                    if Path(part).exists():
+                        os.remove(part)
                 except Exception:
                     pass
 
