@@ -22,6 +22,7 @@ from api_client import (
     list_documents,
     learn_qa, learn_summary, learn_flashcard, learn_quiz,
     learn_notes, learn_slides,
+    generate_outline,
 )
 
 
@@ -295,6 +296,22 @@ with tab_sum:
                 )
             if full is not None:
                 placeholder.markdown(full)
+                # 持久化，避免重跑脚本时（点任何控件）整段总结消失
+                st.session_state["summary_result"] = full
+        if full is None:
+            st.stop()
+    elif "summary_result" in st.session_state:
+        # 复用已生成的总结（避免按钮变 False 后内容消失）
+        with st.chat_message("assistant"):
+            st.markdown(st.session_state["summary_result"])
+    if "summary_result" in st.session_state:
+        st.divider()
+        st.download_button(
+            "📥 下载要点总结 (.md)",
+            data=st.session_state["summary_result"],
+            file_name=f"要点总结_{'_'.join(selected_titles)[:30]}.md",
+            mime="text/markdown",
+        )
 
 # ── Tab 3: 知识卡片 ──
 with tab_card:
@@ -460,36 +477,110 @@ with tab_quiz:
             st.rerun()
 
 
-# ── Tab 5: 复习笔记 ──
+# ── Tab 5: 复习笔记（分步向导：配置→大纲→生成）──
 with tab_notes:
-    st.caption("📒 一键生成**考前复习笔记**：知识框架 + 核心概念 + 易错点 + 记忆口诀 + 自测思考题")
-    if st.button("🚀 生成复习笔记", type="primary"):
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            full = ""
-            for event in learn_notes(selected_ids, st.session_state.learn_thread_id):
-                t = event.get("type")
-                if t == "token":
-                    full += event.get("content", "")
-                    placeholder.markdown(full + "▌")
-                elif t == "done":
-                    placeholder.markdown(full)
-                elif t == "error":
-                    placeholder.error(f"错误：{event.get('msg')}")
-            # 提供下载
-            if full:
-                st.divider()
-                st.download_button(
-                    "📥 下载复习笔记 (.md)",
-                    data=full,
-                    file_name=f"复习笔记_{'_'.join(selected_titles)[:30]}.md",
-                    mime="text/markdown",
-                )
+    st.caption("📒 基于**全文**生成考前复习笔记。先出大纲你确认，再生成成品，全程可调。")
+    step = st.session_state.get("notes_step", 1)
+
+    # Step 1：配置 + 生成大纲
+    if step == 1:
+        focus = st.text_input(
+            "本次重点（可选）",
+            value="",
+            placeholder="如：重点记公式和易错点 / 重点记第3章",
+            key="notes_focus_input",
+        )
+        detail = st.selectbox("详细程度", ["精简", "标准", "详尽"], index=1, key="notes_detail_input")
+        if st.button("🪄 生成笔记大纲", type="primary"):
+            if not selected_ids:
+                st.warning("请先在左侧选择至少一篇文档。")
+                st.stop()
+            with st.spinner("正在通读全文并规划大纲…"):
+                try:
+                    outline = generate_outline(
+                        selected_ids, "notes",
+                        focus=focus, detail_level=detail,
+                    )
+                except Exception as e:
+                    st.error(f"生成大纲失败：{e}")
+                    st.stop()
+            if not outline.strip():
+                st.error("大纲为空，请重试或检查文档是否已解析完成。")
+                st.stop()
+            st.session_state["notes_outline"] = outline
+            st.session_state["notes_focus"] = focus
+            st.session_state["notes_detail"] = detail
+            st.session_state["notes_step"] = 2
+            st.rerun()
+
+    # Step 2：编辑大纲
+    if step == 2:
+        st.success("✅ 大纲已生成，可自由增删改后再生成完整笔记。")
+        edited = st.text_area(
+            "笔记大纲（每行一个章节/主题，可编辑）",
+            value=st.session_state.get("notes_outline", ""),
+            height=280,
+            key="notes_outline_edit",
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ 确认大纲，生成完整笔记", type="primary"):
+                st.session_state["notes_outline_confirmed"] = edited
+                st.session_state["notes_step"] = 3
+                st.rerun()
+        with c2:
+            if st.button("🔄 重新生成大纲"):
+                st.session_state["notes_step"] = 1
+                st.rerun()
+
+    # Step 3：流式生成成品 + 下载
+    if step == 3:
+        outline_confirmed = st.session_state.get("notes_outline_confirmed", "")
+        focus = st.session_state.get("notes_focus", "")
+        detail = st.session_state.get("notes_detail", "标准")
+        # 只有「还没生成过」才真正跑 LLM；已有结果则直接复用（避免重跑重复生成）
+        if "notes_result" not in st.session_state:
+            st.info(f"📋 按确认的大纲生成中（详细程度：{detail}）…")
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                full = ""
+                for event in learn_notes(
+                    selected_ids, st.session_state.learn_thread_id,
+                    outline=outline_confirmed, detail_level=detail, focus=focus,
+                ):
+                    t = event.get("type")
+                    if t == "token":
+                        full += event.get("content", "")
+                        placeholder.markdown(full + "▌")
+                    elif t == "done":
+                        placeholder.markdown(full)
+                    elif t == "error":
+                        placeholder.error(f"错误：{event.get('msg')}")
+            # 持久化生成结果，后续重跑不再重新调 LLM
+            st.session_state["notes_result"] = full
+        else:
+            full = st.session_state["notes_result"]
+            with st.chat_message("assistant"):
+                st.markdown(full)
+
+        if full:
+            st.divider()
+            st.download_button(
+                "📥 下载复习笔记 (.md)",
+                data=full,
+                file_name=f"复习笔记_{'_'.join(selected_titles)[:30]}.md",
+                mime="text/markdown",
+            )
+        if st.button("✏️ 回去改大纲"):
+            # 改大纲后清掉旧结果，确保重新生成
+            st.session_state.pop("notes_result", None)
+            st.session_state["notes_step"] = 2
+            st.rerun()
 
 
-# ── Tab 6: PPT 生成（Marp 格式）──
+# ── Tab 6: PPT 生成（分步向导：配置→大纲→生成，Marp 格式）──
 with tab_slides:
-    st.caption("📽️ 一键生成 **Marp 格式 PPT**（Markdown），下载后用 Marp 工具导出为 PPT")
+    st.caption("📽️ 基于**全文**生成 Marp PPT。先选主题/页数出大纲，你确认后再生成。")
     with st.expander("❓ 如何把 Marp Markdown 变成 PPT？"):
         st.markdown("""
         **方法 1（推荐）：VS Code + Marp 插件**
@@ -497,32 +588,111 @@ with tab_slides:
         2. 打开下载的 `.md` 文件
         3. 点击右上角「导出」按钮，选择 PDF / PPTX / HTML
 
-        **方法 2：在线工具**
-        - 访问 [Marp CLI](https://github.com/marp-team/marp-cli) 或用 `npx @marp-team/marp-cli@latest 文件.md -o 输出.pptx`
+        **方法 2：命令行**
+        `npx @marp-team/marp-cli@latest 文件.md -o 输出.pptx`
 
         **方法 3：Marp Web**
-        - 粘贴到 [marp.app](https://marp.app/) 在线预览和导出
+        粘贴到 [marp.app](https://marp.app/) 在线预览和导出
         """)
-    if st.button("🚀 生成 PPT（Marp 格式）", type="primary"):
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            full = ""
-            for event in learn_slides(selected_ids, st.session_state.learn_thread_id):
-                t = event.get("type")
-                if t == "token":
-                    full += event.get("content", "")
-                    placeholder.markdown(full + "▌")
-                elif t == "done":
-                    placeholder.markdown(full)
-                elif t == "error":
-                    placeholder.error(f"错误：{event.get('msg')}")
-            # 提供下载
-            if full:
-                st.divider()
-                st.download_button(
-                    "📥 下载 PPT Markdown (.md)",
-                    data=full,
-                    file_name=f"PPT_{'_'.join(selected_titles)[:30]}.md",
-                    mime="text/markdown",
-                )
-                st.info("💡 下载后用 VS Code Marp 插件预览/导出为 PPTX（见上方说明）")
+    step = st.session_state.get("slides_step", 1)
+
+    # Step 1：配置 + 生成大纲
+    if step == 1:
+        col_t, col_p = st.columns(2)
+        with col_t:
+            theme = st.selectbox("Marp 主题", ["default", "gaia", "uncover"], key="slides_theme_input")
+        with col_p:
+            page_count = st.number_input("页数", min_value=5, max_value=40, value=10, step=1, key="slides_pages_input")
+        focus = st.text_input(
+            "侧重点（可选）",
+            value="",
+            placeholder="如：偏架构，少讲背景 / 重点讲实验",
+            key="slides_focus_input",
+        )
+        if st.button("🪄 生成 PPT 大纲", type="primary"):
+            if not selected_ids:
+                st.warning("请先在左侧选择至少一篇文档。")
+                st.stop()
+            with st.spinner("正在通读全文并规划 PPT 大纲…"):
+                try:
+                    outline = generate_outline(
+                        selected_ids, "slides",
+                        focus=focus, page_count=int(page_count), theme=theme,
+                    )
+                except Exception as e:
+                    st.error(f"生成大纲失败：{e}")
+                    st.stop()
+            if not outline.strip():
+                st.error("大纲为空，请重试或检查文档是否已解析完成。")
+                st.stop()
+            st.session_state["slides_outline"] = outline
+            st.session_state["slides_theme"] = theme
+            st.session_state["slides_pages"] = int(page_count)
+            st.session_state["slides_focus"] = focus
+            st.session_state["slides_step"] = 2
+            st.rerun()
+
+    # Step 2：编辑大纲
+    if step == 2:
+        st.success("✅ PPT 大纲已生成，可增删页、改标题后再生成。")
+        edited = st.text_area(
+            "PPT 大纲（一行一页：页码. 标题 — 内容说明）",
+            value=st.session_state.get("slides_outline", ""),
+            height=280,
+            key="slides_outline_edit",
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ 确认大纲，生成完整 PPT", type="primary"):
+                st.session_state["slides_outline_confirmed"] = edited
+                st.session_state["slides_step"] = 3
+                st.rerun()
+        with c2:
+            if st.button("🔄 重新生成大纲"):
+                st.session_state["slides_step"] = 1
+                st.rerun()
+
+    # Step 3：流式生成成品 + 下载
+    if step == 3:
+        outline_confirmed = st.session_state.get("slides_outline_confirmed", "")
+        theme = st.session_state.get("slides_theme", "default")
+        pages = st.session_state.get("slides_pages", 10)
+        focus = st.session_state.get("slides_focus", "")
+        # 只有「还没生成过」才真正跑 LLM；已有结果则直接复用（避免重跑重复生成）
+        if "slides_result" not in st.session_state:
+            st.info(f"📋 按确认的大纲生成中（主题：{theme}，约 {pages} 页）…")
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                full = ""
+                for event in learn_slides(
+                    selected_ids, st.session_state.learn_thread_id,
+                    outline=outline_confirmed, theme=theme, page_count=pages, focus=focus,
+                ):
+                    t = event.get("type")
+                    if t == "token":
+                        full += event.get("content", "")
+                        placeholder.markdown(full + "▌")
+                    elif t == "done":
+                        placeholder.markdown(full)
+                    elif t == "error":
+                        placeholder.error(f"错误：{event.get('msg')}")
+            # 持久化生成结果，后续重跑不再重新调 LLM
+            st.session_state["slides_result"] = full
+        else:
+            full = st.session_state["slides_result"]
+            with st.chat_message("assistant"):
+                st.markdown(full)
+
+        if full:
+            st.divider()
+            st.download_button(
+                "📥 下载 PPT Markdown (.md)",
+                data=full,
+                file_name=f"PPT_{'_'.join(selected_titles)[:30]}.md",
+                mime="text/markdown",
+            )
+            st.info("💡 下载后用 VS Code Marp 插件预览/导出为 PPTX（见上方说明）")
+        if st.button("✏️ 回去改大纲"):
+            st.session_state.pop("slides_result", None)
+            st.session_state["slides_step"] = 2
+            st.rerun()

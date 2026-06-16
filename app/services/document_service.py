@@ -97,30 +97,45 @@ class DocumentService:
             if not markdown_content.strip():
                 raise DocumentProcessError(f"Markdown 内容为空: {file_path}")
 
-            # ── Step 5: 保存合并后的 Markdown ──
-            merged_md_path = paper_dir / f"{input_path.stem}.md"
-            merged_md_path.write_text(markdown_content, encoding="utf-8")
-
-            # ── Step 5.5: 图表多模态理解（MiMo）──
+            # ── Step 5: 图表多模态理解（MiMo）──
+            # 顺序调整：先理解图片，再把【图片描述补进 markdown】，
+            # 这样保存的 .md 和全文任务(笔记/PPT/summary)都能看到图片内容，
+            # 不再只靠 ES 里的 image_caption 片段。
             image_captions = []
             try:
-                # MinerU 输出的图片在 mineru_xxx/images/ 目录
                 from app.core.multimodal import multimodal_manager
-                # 找所有 mineru 输出目录下的 images
                 mineru_dirs = list(paper_dir.glob("mineru_*"))
+                # 上限从 config 读，默认 30（覆盖多数文档的图表）
+                max_images = settings.get("document", {}).get("max_images_per_dir", 30)
                 for md_dir in mineru_dirs:
                     images_subdir = md_dir / "images"
                     if images_subdir.exists():
                         image_captions.extend(
                             multimodal_manager.describe_paper_images(
-                                str(images_subdir), max_images=10
+                                str(images_subdir), max_images=max_images
                             )
                         )
                 logger.info(f"图片理解完成: {len(image_captions)} 张")
             except Exception as e:
                 logger.warning(f"图片理解失败（不影响主流程）: {e}")
 
-            # ── Step 6: 分块（文本 + 图片描述合并）──
+            # ── Step 5.5: 把图片描述补进 markdown ──
+            # 以「图表说明」区块附在正文末尾，LLM 读全文时能理解图表含义。
+            # （不插入到原 `![]()` 位置，因为定位困难且可能打乱版面。）
+            if image_captions:
+                caption_lines = ["", "<!-- ===== 图表说明（MiMo 多模态生成）===== -->", ""]
+                for ic in image_captions:
+                    img_name = Path(ic["image_path"]).name
+                    caption_lines.append(f"**📊 {img_name}**：{ic['description']}")
+                    caption_lines.append("")
+                markdown_content = markdown_content.rstrip() + "\n" + "\n".join(caption_lines)
+                logger.info(f"已将 {len(image_captions)} 条图片描述补入 markdown")
+
+            # ── Step 6: 保存合并后的 Markdown（含图片描述）──
+            merged_md_path = paper_dir / f"{input_path.stem}.md"
+            merged_md_path.write_text(markdown_content, encoding="utf-8")
+
+            # ── Step 7: 分块（文本 + 图片描述独立 chunk）──
             chunk_size = settings["elasticsearch"]["chunk_size"]
             chunk_overlap = settings["elasticsearch"]["chunk_overlap"]
 
@@ -132,7 +147,7 @@ class DocumentService:
                 chunk_type="text"
             )
 
-            # 把图片描述作为独立 chunk 追加（chunk_type=image_caption）
+            # 图片描述也作为独立 chunk 追加（chunk_type=image_caption），便于检索命中
             from app.core.chunker import TextChunk
             for i, ic in enumerate(image_captions):
                 img_chunk = TextChunk(
@@ -285,14 +300,51 @@ class DocumentService:
         return md_files[0] if md_files else None
 
     def _merge_markdowns(self, md_files: List[Path]) -> str:
-        """合并多个 Markdown 文件（按子文件顺序）"""
+        """合并多个 Markdown 文件（按子文件顺序）
+
+        同时修正图片相对路径：原 mineru 输出里写 `images/xxx.jpg`，
+        合并后文件存在上级目录，需改成 `mineru_xxx/images/xxx.jpg` 才能正确渲染。
+        """
+        import re
         parts = []
         for i, md_path in enumerate(md_files, 1):
             content = md_path.read_text(encoding="utf-8")
+            # 修正图片路径：images/ → <mineru目录名>/images/
+            mineru_dir_name = md_path.parent.name  # 如 mineru_part1
+            content = re.sub(
+                r"!\[([^\]]*)\]\(images/",
+                lambda m, d=mineru_dir_name: f"![{m.group(1)}]({d}/images/",
+                content,
+            )
             parts.append(
                 f"<!-- === 第 {i} 部分（来源: {md_path.name}）=== -->\n\n{content}\n"
             )
         return "\n".join(parts)
+
+    def get_full_markdown(self, paper_id: int) -> str:
+        """读取某篇论文处理后的完整 Markdown（MinerU 解析 + 合并后的 .md）。
+
+        用于复习笔记 / PPT 这类「需要通读全文」的任务 —— 它们不能只看 RAG
+        检索出来的 top-5 片段，否则只见树木不见森林。
+
+        文件位置：data/papers/<paper_id>/<stem>.md（process_document 时保存）。
+
+        Returns:
+            完整 Markdown 文本。找不到时抛 DocumentProcessError（避免静默失败）。
+        """
+        papers_dir = Path(settings["document"]["papers_dir"])
+        paper_dir = papers_dir / str(paper_id)
+        if not paper_dir.exists():
+            raise DocumentProcessError(
+                f"论文目录不存在: {paper_dir}（paper_id={paper_id} 可能尚未解析完成）"
+            )
+        # 取该 paper_id 下第一个 .md（就是 process_document 存的合并 md）
+        md_files = sorted(paper_dir.glob("*.md"))
+        if not md_files:
+            raise DocumentProcessError(
+                f"论文 {paper_id} 目录下没有 Markdown 文件: {paper_dir}"
+            )
+        return md_files[0].read_text(encoding="utf-8")
 
 
 # 全局实例

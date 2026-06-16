@@ -138,6 +138,27 @@ async def list_documents():
         db.close()
 
 
+@router.get("/{paper_id}/markdown", response_model=APIResponse)
+async def get_markdown(paper_id: int):
+    """获取某篇论文的完整 Markdown（MinerU 解析结果）。
+
+    用于「查看原文」、以及前端拼装复习笔记/PPT 的全文上下文。
+    """
+    db = Database.get_session()
+    try:
+        paper = db.query(Paper).filter(Paper.paper_id == paper_id).first()
+        if not paper:
+            raise NotFoundError(f"论文 {paper_id} 不存在")
+        title = paper.title
+    finally:
+        db.close()
+    try:
+        content = document_service.get_full_markdown(paper_id)
+    except Exception as e:
+        return APIResponse(code=404, msg=f"读取全文失败：{e}")
+    return APIResponse(data={"paper_id": paper_id, "title": title, "markdown": content})
+
+
 @router.delete("/{paper_id}", response_model=APIResponse)
 async def delete_document(paper_id: int):
     """删除论文（同步删除 ES 索引）"""

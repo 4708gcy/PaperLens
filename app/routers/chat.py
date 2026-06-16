@@ -44,6 +44,9 @@ def _build_input_state(request: ChatRequest) -> dict:
         "outline": [],
         "final_report": "",
         "learn_mode": request.learn_mode or "",
+        "learn_outline": request.learn_outline or "",
+        "learn_config": request.learn_config or {},
+        "retrieval_mode": request.retrieval_mode or "",
     }
 
 

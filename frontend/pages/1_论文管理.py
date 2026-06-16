@@ -19,7 +19,11 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file and st.button("📤 上传并处理", type="primary"):
     with st.spinner("正在上传..."):
-        result = upload_document(uploaded_file)
+        try:
+            result = upload_document(uploaded_file)
+        except Exception as e:
+            st.error(f"❌ 上传失败（后端可能未启动）：{e}")
+            st.stop()
     if result.get("code") == 200:
         st.success(f"✅ {uploaded_file.name} 上传成功！paper_id={result['data']['paper_id']}")
         st.info("⏳ 后台正在处理（MinerU 解析 + MiMo 图表理解 + 向量化索引），约 1-3 分钟")
@@ -42,7 +46,7 @@ else:
     for p in papers:
         status_emoji = {
             "processing": "⏳", "indexed": "✅", "failed": "❌", "pending": "⏸️"
-        }.get(p["status"], "❓")
+        }.get(p.get("status", ""), "❓")
         col1, col2, col3, col4 = st.columns([4, 1, 1, 1])
         with col1:
             st.write(f"{status_emoji} **[{p['paper_id']}]** {p['title']}")
@@ -52,7 +56,11 @@ else:
             st.caption(f"{p.get('chunk_count', 0)} 块")
         with col4:
             if st.button("🗑️", key=f"del_{p['paper_id']}", help="删除"):
-                r = delete_document(p["paper_id"])
+                try:
+                    r = delete_document(p["paper_id"])
+                except Exception as e:
+                    st.error(f"删除失败（后端可能未启动）：{e}")
+                    st.stop()
                 if r.get("code") == 200:
                     st.success("已删除")
                     time.sleep(0.5)

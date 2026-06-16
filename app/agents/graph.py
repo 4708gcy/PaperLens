@@ -35,10 +35,11 @@ from langgraph.types import Send
 from app.config import settings
 from app.agents.state import PaperLensState
 from app.agents.prompts import (
-    TRIAGE_SYSTEM, QA_SYSTEM, ANALYZE_SYSTEM, GENERAL_SYSTEM,
+    TRIAGE_SYSTEM, QA_SYSTEM, RAG_QA_SYSTEM, ANALYZE_SYSTEM, GENERAL_SYSTEM,
     SYNTHESIZE_PLANNER_SYSTEM, SECTION_WRITER_SYSTEM, ASSEMBLER_SYSTEM,
     LEARN_QA_SYSTEM, LEARN_SUMMARY_SYSTEM, LEARN_FLASHCARD_SYSTEM, LEARN_QUIZ_SYSTEM,
     LEARN_NOTES_SYSTEM, LEARN_SLIDES_SYSTEM,
+    LEARN_NOTES_OUTLINE_SYSTEM, LEARN_SLIDES_OUTLINE_SYSTEM,
 )
 from app.logger import logger
 
@@ -205,30 +206,61 @@ def qa_node(state: PaperLensState) -> dict:
     """
     知识问答节点
 
+    素材来源：
+    - retrieval_mode="rag"（综合问答模块）：用 retrieve 检索到的 ES 片段（跨文档定位）
+    - 默认（论文精读）：读全文 markdown（1M 上下文塞得下）
+
     检索为空时的兜底：在 system 里明确标注"未检索到相关内容"，
-    让模型按 QA_SYSTEM 规则 #5 诚实回应（区分"文档没讲"和"通用理解"），
-    而不是直接套用通用知识或说"无法访问文件"。
+    让模型诚实回应（区分"文档没讲"和"通用理解"）。
     """
     last_msg = state["messages"][-1]
-    context = state.get("context", "")
-    if not context or not context.strip() or "未检索到相关论文内容" in context:
-        context = '（注意：本次未检索到该文档的相关片段。请按规则如实说明文档未提及，并可补充明确标注为「通用理解（仅供参考）」的内容。）'
-    prompt = QA_SYSTEM.format(context=context)
+    retrieval_mode = state.get("retrieval_mode", "")
+
+    if retrieval_mode == "rag":
+        # 综合问答：用 ES 检索片段
+        context = state.get("context", "")
+        source = "检索片段（ES 跨文档）"
+        if not context or not context.strip():
+            context = '（注意：未检索到相关内容。请如实说明所选语料里没有直接讲这个问题，并可补充明确标注为「通用理解（仅供参考）」的内容。）'
+            source = "检索为空"
+        prompt = RAG_QA_SYSTEM.format(context=context)
+    else:
+        # 论文精读：全文
+        paper_ids = state.get("paper_ids", []) or []
+        try:
+            context = _load_full_markdown(paper_ids)
+            source = "全文"
+        except Exception as e:
+            logger.warning(f"qa_node 全文读取失败，降级检索片段: {e}")
+            context = state.get("context", "")
+            source = "检索片段（全文读取失败降级）"
+        prompt = QA_SYSTEM.format(context=context)
+
     response = llm.invoke([
         SystemMessage(content=prompt),
         HumanMessage(content=last_msg.content)
     ])
+    logger.info(f"qa 完成（素材={source}）")
     return {"messages": [response]}
 
 
 def analyze_node(state: PaperLensState) -> dict:
-    """结构化解读节点"""
+    """结构化解读节点（优先全文，1篇全文塞得下）"""
     last_msg = state["messages"][-1]
-    prompt = ANALYZE_SYSTEM.format(context=state.get("context", ""))
+    paper_ids = state.get("paper_ids", []) or []
+    try:
+        context = _load_full_markdown(paper_ids)
+        source = "全文"
+    except Exception as e:
+        logger.warning(f"analyze_node 全文读取失败，降级检索片段: {e}")
+        context = state.get("context", "")
+        source = "检索片段"
+    prompt = ANALYZE_SYSTEM.format(context=context)
     response = llm.invoke([
         SystemMessage(content=prompt),
         HumanMessage(content=last_msg.content)
     ])
+    logger.info(f"analyze 完成（素材={source}）")
     return {"messages": [response]}
 
 
@@ -255,17 +287,37 @@ def learn_node(state: PaperLensState) -> dict:
     - summary: 整篇课件结构化大纲摘要
     - flashcard: 知识卡片（JSON）
     - quiz: 自测选择题（JSON）
-    - notes: 复习笔记（Markdown，知识框架+易错点+记忆口诀）
-    - slides: PPT 生成（Marp 格式 Markdown，可一键导出 PPT）
+    - notes: 复习笔记（读全文 Markdown + 用户大纲，Markdown 输出）
+    - slides: PPT 生成（读全文 Markdown + 用户大纲 + 主题/页数，Marp 格式）
 
-    复用 retrieve_node 检索到的 context（课件片段）。
+    素材来源：
+    - 片段型（qa/summary/flashcard/quiz）：用 retrieve_node 检索到的 state.context（top-5 ES 片段）
+    - 全文型（notes/slides）：改读磁盘上的完整 Markdown —— 这类任务要"通读全文"，
+      只看 top-5 片段会只见树木不见森林。
+
     flashcard/quiz 不在此节点解析 JSON —— 保持原始文本流式推送，
     由前端在 'done' 后解析（解析容错：去掉 ```json 包裹）。
     """
     mode = state.get("learn_mode", "qa") or "qa"
     last_msg = state["messages"][-1]
-    context = state.get("context", "")
+    retrieved_context = state.get("context", "")
+    config = state.get("learn_config", {}) or {}
+    user_outline = state.get("learn_outline", "") or ""
+    paper_ids = state.get("paper_ids", []) or []
 
+    # ── 学习助手一律走全文（用户要求：所有模式优先通读全文再回答）──
+    # 全文优先：context 用磁盘上的完整 Markdown（含图表描述），LLM 能看全。
+    # 检索片段(retrieved_context)仅作文案/日志参考，不再喂给 LLM。
+    # 若全文读取失败（如文档未解析完），降级用检索片段，保证不报错。
+    try:
+        context = _load_full_markdown(paper_ids)
+        source_note = "完整资料（MinerU 解析的全文 Markdown，含图表说明）"
+    except Exception as e:
+        logger.warning(f"全文读取失败，降级用检索片段（mode={mode}）: {e}")
+        context = retrieved_context
+        source_note = "检索到的课件片段（全文读取失败，降级）"
+
+    # ── 选 prompt 模板 ──
     prompt_map = {
         "qa": LEARN_QA_SYSTEM,
         "summary": LEARN_SUMMARY_SYSTEM,
@@ -275,21 +327,93 @@ def learn_node(state: PaperLensState) -> dict:
         "slides": LEARN_SLIDES_SYSTEM,
     }
     template = prompt_map.get(mode, LEARN_QA_SYSTEM)
-    prompt = template.format(context=context)
 
-    # summary/flashcard/quiz 是"一键生成"类任务：用户消息作为任务指令补充
+    # ── 填充模板占位符 ──
+    # 片段型只有 {context}；全文型还有 {outline}/{focus}/{detail_level}/{theme}/{page_count}
+    placeholders = {"context": context}
+    if mode == "notes":
+        placeholders["outline"] = user_outline if user_outline.strip() else "（用户未提供大纲，请自行组织结构）"
+        placeholders["focus"] = config.get("focus", "") or ""
+        placeholders["detail_level"] = config.get("detail_level", "") or "标准"
+    elif mode == "slides":
+        placeholders["outline"] = user_outline if user_outline.strip() else "（用户未提供大纲，请自行规划页序）"
+        placeholders["theme"] = config.get("theme", "") or "default"
+        placeholders["page_count"] = str(config.get("page_count", "") or 10)
+        placeholders["focus"] = config.get("focus", "") or ""
+
+    try:
+        prompt = template.format(**placeholders)
+    except KeyError as e:
+        # 模板里有未提供的占位符，兜底用 context
+        logger.warning(f"learn_node prompt 缺占位符 {e}，回退只填 context")
+        prompt = template.format(context=context)
+
+    # summary/flashcard/quiz/notes/slides 是"一键生成"类任务：用户消息作为任务指令补充
     # qa 模式则是正常问答
     if mode == "qa":
         user_content = last_msg.content
     else:
-        user_content = f"请基于上面检索到的课件片段完成此任务。学生原始输入：{last_msg.content}"
+        user_content = f"请基于上面的【{source_note}】完成此任务。学生原始输入：{last_msg.content}"
 
     response = llm.invoke([
         SystemMessage(content=prompt),
         HumanMessage(content=user_content)
     ])
-    logger.info(f"学习助手完成（mode={mode}）")
+    logger.info(f"学习助手完成（mode={mode}, 素材={source_note}）")
     return {"messages": [response]}
+
+
+def _load_full_markdown(paper_ids: list, max_chars: int = 600000) -> str:
+    """把多篇论文的完整 Markdown 拼成一段全文，供「通读全文」任务使用。
+
+    qwen3.7-plus 上下文 1M tokens（≈中文 180 万字）。这里留出 prompt + 输出空间，
+    默认 max_chars=60万字（≈30万tokens），单篇/少数几篇完全够用。
+
+    超限处理（一次性选几十篇课件的极端情况）：
+    - 不直接报错，而是【按篇均摊截断】：每篇只保留开头 + 结尾各一半，保证每篇都能被看到。
+    - 截断时打明确标记，让 LLM 知道这是节选。
+
+    单篇直接返回；多篇用分隔标注区分。任何一篇读取失败会跳过并记日志。
+    """
+    from app.services.document_service import document_service
+    docs = []  # [(pid, md)]
+    for pid in paper_ids:
+        try:
+            docs.append((pid, document_service.get_full_markdown(pid)))
+        except Exception as e:
+            logger.warning(f"读取论文 {pid} 全文失败，跳过该篇: {e}")
+    if not docs:
+        return "（未能读取到任何全文内容，请检查文档是否已解析完成）"
+
+    total = sum(len(md) for _, md in docs)
+    if total <= max_chars:
+        # 没超限，全量拼接
+        if len(docs) == 1:
+            return docs[0][1]
+        parts = []
+        for i, (pid, md) in enumerate(docs, 1):
+            parts.append(f"\n\n===== 资料{i}（paper_id={pid}）=====\n\n{md}")
+        return "".join(parts)
+
+    # 超限：按篇均摊预算，每篇保留开头+结尾
+    logger.warning(
+        f"全文合计 {total} 字超限（max={max_chars}），{len(docs)} 篇将做均摊截断"
+    )
+    per_doc_budget = max(max_chars // len(docs), 2000)  # 每篇至少留 2000 字
+    parts = []
+    for i, (pid, md) in enumerate(docs, 1):
+        if len(md) <= per_doc_budget:
+            chunk = md
+        else:
+            half = per_doc_budget // 2
+            chunk = (
+                md[:half]
+                + f"\n\n……（本篇已截断，原文 {len(md)} 字，此处仅保留开头与结尾）……\n\n"
+                + md[-half:]
+            )
+        parts.append(f"\n\n===== 资料{i}（paper_id={pid}，{len(md)}字）=====\n\n{chunk}")
+    header = f"（注意：你选择的 {len(docs)} 篇资料合计超长，以下为每篇节选拼接，详见各篇标记。）\n"
+    return header + "".join(parts)
 
 
 # ──────────────────────────────────────────────
@@ -459,12 +583,31 @@ def assembler_node(state: PaperLensState) -> dict:
 
 
 def route_after_triage(state: PaperLensState):
-    """三路路由：triage 后根据意图分发（qa/analyze/learn 都先去检索）"""
+    """路由：triage 后根据意图分发
+
+    - synthesize → planner（综述规划，仍走检索）
+    - qa → qa_agent、analyze → analyze_agent（直达，跳过检索；走全文 markdown）
+    - learn → learn_agent（直达，跳过检索；学习助手走全文 markdown）
+    - 其他 → general_agent（闲聊）
+
+    为什么 qa/analyze/learn 默认跳过 retrieve？
+    — qwen3.7-plus 上下文 1M，单篇/少数几篇全文塞得下，全文比 top-5 片段质量更高。
+    — retrieve_node 现在主要被 synthesize 的 section_worker 间接复用。
+
+    例外：retrieval_mode="rag"（综合问答模块）时，qa 走 retrieve（ES 跨文档检索），
+    因为综合问答场景是「跨大量文档定位相关片段」，全文塞不下也不该塞。
+    """
     intent = state.get("intent", "general")
+    retrieval_mode = state.get("retrieval_mode", "")
     if intent == "synthesize":
         return "planner"
-    elif intent in ("qa", "analyze", "learn"):
-        return "retrieve"
+    elif intent == "learn":
+        return "learn_agent"
+    elif intent == "qa":
+        # 综合问答模块显式要求走 ES 检索（跨文档）；否则走全文直喂
+        return "retrieve" if retrieval_mode == "rag" else "qa_agent"
+    elif intent == "analyze":
+        return "analyze_agent"
     return "general_agent"
 
 
@@ -516,10 +659,18 @@ def build_graph():
     # 入口
     builder.add_edge(START, "triage")
 
-    # 条件边 1：triage → retrieve / planner / general_agent（三路）
+    # 条件边 1：triage → planner / qa_agent / analyze_agent / learn_agent / general_agent
+    # qa/analyze/learn 全部直达对应 agent（跳过 retrieve，走全文）。
+    # synthesize 仍走 planner。retrieve 节点仅被综述的 section_worker 间接复用。
     builder.add_conditional_edges(
         "triage", route_after_triage,
-        {"retrieve": "retrieve", "planner": "planner", "general_agent": "general_agent"}
+        {
+            "planner": "planner",
+            "qa_agent": "qa_agent",
+            "analyze_agent": "analyze_agent",
+            "learn_agent": "learn_agent",
+            "general_agent": "general_agent",
+        }
     )
 
     # 条件边 2：retrieve → qa_agent / analyze_agent / learn_agent

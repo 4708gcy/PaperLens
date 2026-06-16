@@ -49,3 +49,7 @@ document:
   upload_dir: "data/uploads"
   papers_dir: "data/papers"
   db_path: "data/paperlens.db"
+  # 单个 mineru 输出目录下，最多给多少张图片调 MiMo 生成文字描述。
+  # 描述会同时写进合并 markdown（供全文任务理解图片）和 ES（供检索）。
+  # 设 0 表示不生成图片描述；null/省略表示不设上限（处理全部图片）。
+  max_images_per_dir: 30

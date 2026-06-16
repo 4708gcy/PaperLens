@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.models.orm import Database
-from app.routers import documents, chat
+from app.routers import documents, chat, learn
 from app.exceptions import register_exception_handlers
 from app.logger import logger
 
@@ -79,6 +79,7 @@ register_exception_handlers(app)
 # 注册路由
 app.include_router(documents.router)
 app.include_router(chat.router)
+app.include_router(learn.router)
 
 
 @app.get("/health")

@@ -28,6 +28,12 @@ class PaperLensState(TypedDict):
     # 学习助手模式："" / "qa" / "summary" / "flashcard" / "quiz"
     # 非空时 triage 直接走 learn 意图，retrieve 后由 learn_agent 处理
     learn_mode: str
+    # 学习助手 · 用户确认后的大纲（笔记/PPT 分步向导第 2 步产物）
+    learn_outline: str
+    # 学习助手 · 其他配置（detail_level / theme / page_count / focus）
+    learn_config: dict
+    # 综合问答模块用：retrieval_mode="rag" 时 qa 走 ES 检索；空则走全文
+    retrieval_mode: str
     # 综述主题（仅 synthesize 用）
     topic: str
     # 综述章节（Send 并行 reduce，Phase 3 用）
