@@ -15,12 +15,30 @@ from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from app.schemas import APIResponse, OutlineRequest
-from app.agents.graph import fast_llm
+from app.agents.graph import _make_llm
 from app.agents.graph import _load_full_markdown
 from app.agents.prompts import LEARN_NOTES_OUTLINE_SYSTEM, LEARN_SLIDES_OUTLINE_SYSTEM
+from app.config import settings
 from app.logger import logger
 
 router = APIRouter(prefix="/api/v1/learn", tags=["learn"])
+
+
+def _get_outline_llm():
+    """现场创建一个【强制关 thinking】的快速 LLM，用于大纲生成。
+
+    为什么不复用全局 fast_llm？
+    - 早期版本 fast_llm 继承了全局 enable_thinking=True，导致大纲生成触发
+      thinking 模式的 98304 token 输入上限（全书 109 万字必超）报 400。
+    - 全局变量在 uvicorn --reload 时可能不重新赋值（模块级语句偶尔不重跑），
+      现场创建彻底绕开这个隐患。
+    - 大纲是结构化任务，不需要深度推理，关 thinking 还能省 45s 首 token 延迟。
+    """
+    return _make_llm(
+        temperature=0,
+        model=settings["llm"]["fast_model"],
+        enable_thinking=False,
+    )
 
 
 class SlidesExportRequest(BaseModel):
@@ -44,7 +62,10 @@ async def generate_outline(request: OutlineRequest):
     template = LEARN_NOTES_OUTLINE_SYSTEM if mode == "notes" else LEARN_SLIDES_OUTLINE_SYSTEM
 
     try:
-        full_text = _load_full_markdown(request.paper_ids)
+        # 大纲用关 thinking 的 LLM（_get_outline_llm），输入上限回到 1M token，
+        # 所以全文预算用 60 万字（thinking=False 的预算），而非默认的 18 万。
+        # 否则超长书只会看到头尾 18 万字，中间内容缺失，大纲质量打折。
+        full_text = _load_full_markdown(request.paper_ids, max_chars=600000)
     except Exception as e:
         logger.error(f"读取全文失败: {e}", exc_info=True)
         return APIResponse(code=500, msg=f"读取全文失败：{e}")
@@ -64,7 +85,9 @@ async def generate_outline(request: OutlineRequest):
         return APIResponse(code=500, msg=f"模板缺占位符：{e}")
 
     try:
-        resp = fast_llm.invoke([
+        # 现场创建关 thinking 的 LLM（绕开全局 fast_llm 可能未刷新的隐患）
+        outline_llm = _get_outline_llm()
+        resp = outline_llm.invoke([
             SystemMessage(content=prompt),
             HumanMessage(content="请输出大纲。"),
         ])

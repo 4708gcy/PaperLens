@@ -163,3 +163,65 @@ def is_pdf(file_path: str) -> bool:
 def get_pdf_page_count(pdf_path: str) -> int:
     """获取 PDF 页数"""
     return len(PdfReader(pdf_path).pages)
+
+
+def count_pdf_images(pdf_path: str) -> int:
+    """统计 PDF 内嵌图片数量（用于格式路由判断）。
+
+    遍历每页的 /XObject 资源，统计类型为 Image 的对象。
+    扫描件 PDF 的典型特征：每页 1 张大图（整页是图片），242 页 → ~242 张。
+    可编辑 PDF（文本层）通常每页 0-3 张图（真正的插图）。
+
+    用途：document_service 据此智能决定是否值得让 MinerU 跑图表理解，
+    以及提示用户"这像是扫描件"。
+    """
+    try:
+        reader = PdfReader(pdf_path)
+        count = 0
+        for page in reader.pages:
+            resources = page.get("/Resources")
+            if not resources:
+                continue
+            xobjects = resources.get("/XObject")
+            if not xobjects:
+                continue
+            # xobjects 可能是 IndirectObject，需 resolve
+            try:
+                xobjects = xobjects.get_object()
+            except Exception:
+                pass
+            for name in xobjects:
+                obj = xobjects[name]
+                try:
+                    obj = obj.get_object()
+                    if obj.get("/Subtype") == "/Image":
+                        count += 1
+                except Exception:
+                    continue
+        return count
+    except Exception:
+        return -1   # 数不准时返回 -1，调用方按"无法判断"处理
+
+
+def count_docx_images(docx_path: str) -> int:
+    """统计 DOCX 内嵌图片数量（用 zipfile 读 word/media/ 目录）。
+
+    DOCX 本质是 zip，图片统一放在 word/media/ 下。
+    """
+    import zipfile
+    try:
+        with zipfile.ZipFile(docx_path, "r") as z:
+            return sum(1 for n in z.namelist() if n.startswith("word/media/"))
+    except Exception:
+        return -1
+
+
+def count_file_images(file_path: str) -> int:
+    """按文件类型统计内嵌图片数（PDF / DOCX / DOC / PPTX）。返回 -1 表示无法判断。"""
+    suffix = Path(file_path).suffix.lower()
+    if suffix == ".pdf":
+        return count_pdf_images(file_path)
+    if suffix == ".docx":
+        return count_docx_images(file_path)
+    # .doc / .ppt / .pptx 需先转 PDF/解 zip 才能数，成本高；返回 -1 让调用方走默认
+    return -1

@@ -10,6 +10,18 @@ class APIResponse(BaseModel):
     data: Optional[Any] = None
 
 
+class UploadOptions(BaseModel):
+    """上传时的格式路由选项（可选，默认走智能判断）。
+
+    - force_pdf: True=强制转PDF(最稳)；False=原格式直解；None=智能判断(按图片数)
+    - image_threshold: 智能判断的图片数阈值，非PDF且图片数<该值则原格式直解，否则转PDF
+    - image_mode: 图片理解开关。"on"=处理全部图片(论文/报告)；"off"=完全跳过(教材/数学书)
+    """
+    force_pdf: Optional[bool] = None
+    image_threshold: int = 10
+    image_mode: str = "on"   # "on" / "off"
+
+
 class ChatRequest(BaseModel):
     """对话请求"""
     message: str

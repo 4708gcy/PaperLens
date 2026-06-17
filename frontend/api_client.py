@@ -6,12 +6,28 @@ from typing import Generator, Dict, Any, List
 BASE_URL = "http://127.0.0.1:8000/api/v1"
 
 
-def upload_document(file) -> dict:
-    """上传论文"""
+def upload_document(file, force_pdf=None, image_mode="on") -> dict:
+    """上传论文。
+
+    force_pdf:
+    - None（默认）：后端按图片数智能判断（图片少→原格式直解，多→转PDF）
+    - True：强制 LibreOffice 转 PDF（最稳，适合图片多/扫描件转的Word）
+    - False：原格式直解 MinerU（适合图片少、文本层完整的可编辑 Word/PPT）
+
+    image_mode（图片理解开关，二态）：
+    - "on"（默认）：处理全部图片，描述补进全文+ES（论文/报告适用）
+    - "off"：完全跳过图片理解（教材/数学书适用，省 30+ 分钟）
+    """
+    params = {}
+    if force_pdf is not None:
+        params["force_pdf"] = "true" if force_pdf else "false"
+    if image_mode and image_mode in ("on", "off"):
+        params["image_mode"] = image_mode
     with httpx.Client(timeout=120) as client:
         response = client.post(
             f"{BASE_URL}/documents/upload",
-            files={"file": (file.name, file, "application/octet-stream")}
+            files={"file": (file.name, file, "application/octet-stream")},
+            params=params,
         )
     return response.json()
 

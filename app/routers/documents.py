@@ -2,10 +2,12 @@
 import os
 import shutil
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, BackgroundTasks
+from typing import Optional
+from fastapi import APIRouter, UploadFile, File, BackgroundTasks, Query
 from app.schemas import APIResponse
 from app.services.document_service import document_service
 from app.core.rag_engine import rag_engine
+from app.core.pdf_splitter import count_file_images
 from app.models.orm import Database, Paper
 from app.config import settings
 from app.exceptions import NotFoundError
@@ -13,11 +15,39 @@ from app.logger import logger
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
 
+# 智能判断的图片数阈值：非 PDF 且图片数 < 此值 → 原格式直解；否则 → 转 PDF
+# 理由：图片少的 Word/PPT 文本层完整，MinerU 直解质量好且省一次转换；
+#       图片多（或扫描件转的 Word）转 PDF 更稳，版面识别更准。
+DEFAULT_IMAGE_THRESHOLD = 10
+
+
+def _decide_force_pdf(file_path: str, user_choice: Optional[bool],
+                      threshold: int = DEFAULT_IMAGE_THRESHOLD) -> bool:
+    """格式路由核心：决定非 PDF 文件是否先转 PDF。
+
+    优先级：
+    1. 用户显式选择（force_pdf=true/false）→ 直接采用
+    2. 否则按图片数智能判断：< threshold 原格式直解，>= threshold 转 PDF
+    3. 数不准（-1）→ 保守转 PDF（最稳）
+    """
+    if user_choice is not None:
+        return user_choice
+    img_count = count_file_images(file_path)
+    if img_count < 0:
+        logger.info(f"图片数无法判断（{file_path}），保守转 PDF")
+        return True
+    decision = img_count >= threshold
+    logger.info(f"格式路由：{Path(file_path).name} 有 {img_count} 张图 "
+                f"(阈值 {threshold}) → {'转PDF' if decision else '原格式直解'}")
+    return decision
+
 
 @router.post("/upload", response_model=APIResponse)
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    force_pdf: Optional[bool] = Query(None, description="True=强制转PDF；False=原格式直解；不传=智能判断"),
+    image_mode: str = Query("on", description="图片理解开关：on=处理全部图片；off=跳过（教材/数学书）"),
 ):
     """
     上传论文 PDF（或其他格式），后台异步处理：MinerU → 分块 → 索引
@@ -25,6 +55,16 @@ async def upload_document(
     为什么用 BackgroundTasks 而不是同步？
     — MinerU 转换 + 向量化可能 1-3 分钟
     — 先保存文件即刻返回 paper_id，后台异步处理，避免 HTTP 超时
+
+    格式路由（force_pdf 参数）：
+    — PDF 输入：参数无意义，直接处理
+    — 非 PDF + force_pdf=True：LibreOffice 转 PDF（最稳）
+    — 非 PDF + force_pdf=False：原格式直解 MinerU（图片少的 Word/PPT 推荐）
+    — 非 PDF + force_pdf=None：按图片数智能判断
+
+    图片理解（image_mode 参数）：
+    — "on"（默认）：处理全部图片，描述补进全文+ES（论文/报告适用）
+    — "off"：完全跳过图片理解（教材/数学书适用，省 30+ 分钟）
     """
     # 校验文件类型
     ext = os.path.splitext(file.filename)[1].lower()
@@ -83,6 +123,36 @@ async def upload_document(
 
     logger.info(f"文件已保存: {file_path}, paper_id={paper_id}")
 
+    # 智能判断格式路由（PDF 无所谓；非 PDF 在此决策）
+    is_pdf_input = ext == ".pdf"
+    if is_pdf_input:
+        decided_force_pdf = True   # PDF 本就是 PDF，传 True 不影响（process_document 里 PDF 直接用）
+        scan_warning = ""
+        # 对 PDF 做一次扫描件检测，仅作日志提示（不拦截）
+        try:
+            img_n = count_file_images(str(file_path))
+            if img_n > 0:
+                pages = 0
+                try:
+                    from app.core.pdf_splitter import get_pdf_page_count
+                    pages = get_pdf_page_count(str(file_path))
+                except Exception:
+                    pass
+                if pages > 0 and img_n >= pages * 0.8:
+                    scan_warning = (f"⚠️ 该 PDF 内嵌 {img_n} 张图 / {pages} 页，"
+                                    f"疑似扫描件。如解析效果差，建议用 WPS 转为「可编辑 PDF」或 DOCX 后重新上传。")
+                    logger.warning(scan_warning)
+        except Exception:
+            pass
+    else:
+        decided_force_pdf = _decide_force_pdf(str(file_path), force_pdf)
+        scan_warning = ""
+
+    # 规范化 image_mode（防非法值；None/异常都回落到 on）
+    decided_image_mode = (image_mode or "on").lower()
+    if decided_image_mode not in ("on", "off"):
+        decided_image_mode = "on"
+
     # 后台异步处理
     def _process():
         db2 = Database.get_session()
@@ -90,7 +160,9 @@ async def upload_document(
             result = document_service.process_document(
                 file_path=str(file_path),
                 paper_id=paper_id,
-                title=Path(file.filename).stem
+                title=Path(file.filename).stem,
+                force_pdf=decided_force_pdf,
+                image_mode=decided_image_mode,
             )
             paper_obj = db2.query(Paper).filter(Paper.paper_id == paper_id).first()
             if paper_obj:
@@ -113,7 +185,13 @@ async def upload_document(
 
     return APIResponse(
         msg="文件上传成功，后台处理中（MinerU + 索引约 1-3 分钟）",
-        data={"paper_id": paper_id, "filename": file.filename}
+        data={
+            "paper_id": paper_id,
+            "filename": file.filename,
+            "force_pdf": decided_force_pdf,
+            "image_mode": decided_image_mode,
+            "scan_warning": scan_warning,
+        }
     )
 
 

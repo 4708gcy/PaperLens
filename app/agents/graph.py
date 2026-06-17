@@ -58,18 +58,51 @@ def _build_human_message(text: str, images: list) -> HumanMessage:
     return HumanMessage(content=content)
 
 
+def _build_chat_messages(system_prompt: str, state: dict, history_window: int = 10) -> list:
+    """构造多轮对话消息序列：system + 最近 N 轮历史 + 当前消息(可带图片)。
+
+    这是"多轮记忆"修复的核心：
+    - checkpointer 已把同一 thread_id 的历史累积在 state["messages"] 里（存储没问题），
+      但早期节点的 llm.invoke 只喂了 SystemMessage + state["messages"][-1]（当前一句），
+      导致模型看不到上文 → 回答"这是我们第一次交流"。
+    - 这里把历史 Human/AIMessage 原样追加进消息序列，LLM 就能"记得刚才聊了什么"。
+
+    - 为什么加历史窗口而非全量：system 里已塞了全文 markdown（可能几十万字），
+      历史无上限叠加会撑爆上下文；最近 10 轮（user+ai 共 20 条）足够覆盖"刚才聊的"。
+    - 一次性生成任务（analyze/summary/flashcard/quiz/notes/slides）不走这里，
+      仍保持 SystemMessage + 单条输入。
+    """
+    history = state.get("messages", []) or []
+    if not history:
+        return [SystemMessage(content=system_prompt), HumanMessage(content="")]
+    current = history[-1]
+    prior = history[:-1][-history_window * 2:]   # 最近 N 轮（每轮 user+ai）
+    images = state.get("images", []) or []
+    msgs = [SystemMessage(content=system_prompt)]
+    msgs.extend(prior)                            # 历史原样追加（含 AIMessage）
+    msgs.append(_build_human_message(str(current.content), images))
+    return msgs
+
+
 # ── LLM 实例 ──
-def _make_llm(temperature: float = 0.7, model: str = None) -> ChatOpenAI:
+def _make_llm(temperature: float = 0.7, model: str = None,
+              enable_thinking: bool = None) -> ChatOpenAI:
     """创建 LLM 实例（OpenAI 兼容协议调 Qwen，含 retry 应对 QPS 限流）
 
     qwen3.7-plus 是「混合思考模型」：
     - enable_thinking=true：先输出 reasoning_content（content 为空），再输出正式回答。
       质量更高，但流式首 token 要等 ~45s（思考静默期）。
+      ⚠️ 重要限制：思考模式开启时，输入上限骤降为 98304 tokens（远小于非思考的 1M）。
+      因此"读全文"类任务若输入超长，必须关 thinking 或截断到 98K 以内。
     - enable_thinking=false：立即以 content 流式输出，首 token ~1s，但回答不经过深思。
-    开关由 config.yaml 的 llm.enable_thinking 控制，默认 true（重质量）。
+
+    enable_thinking 参数：
+    - None（默认）：用 config.yaml 的 llm.enable_thinking
+    - True/False：显式覆盖（如 fast_llm 用于结构化任务时强制关闭，绕开 98K 限制 + 省延迟）
     见 https://www.alibabacloud.com/help/en/model-studio/deep-thinking
     """
-    enable_thinking = bool(settings["llm"].get("enable_thinking", True))
+    if enable_thinking is None:
+        enable_thinking = bool(settings["llm"].get("enable_thinking", True))
     return ChatOpenAI(
         api_key=settings["llm"]["api_key"],
         base_url=settings["llm"]["base_url"],
@@ -84,10 +117,13 @@ def _make_llm(temperature: float = 0.7, model: str = None) -> ChatOpenAI:
     )
 
 
-# 主力模型（用于回答）
+# 主力模型（用于深度问答/综述写作）—— 开 thinking，重质量
 llm = _make_llm(temperature=0.7)
-# 快速模型（用于意图分类，省钱）
-fast_llm = _make_llm(temperature=0, model=settings["llm"]["fast_model"])
+# 快速模型（用于意图分类/大纲生成/知识卡片等结构化任务）—— 强制关 thinking：
+# 1) 这些任务不需要深度推理，thinking 反而拖慢（首 token 45s）
+# 2) 思考模式输入上限 98304 tokens，"读全文生成大纲"必然超限报错
+fast_llm = _make_llm(temperature=0, model=settings["llm"]["fast_model"],
+                     enable_thinking=False)
 
 
 # ──────────────────────────────────────────────
@@ -245,10 +281,10 @@ def qa_node(state: PaperLensState) -> dict:
 
     检索为空时的兜底：在 system 里明确标注"未检索到相关内容"，
     让模型诚实回应（区分"文档没讲"和"通用理解"）。
+
+    多轮记忆：经 _build_chat_messages 注入最近 N 轮历史，模型能"记得刚才聊了什么"。
     """
-    last_msg = state["messages"][-1]
     retrieval_mode = state.get("retrieval_mode", "")
-    images = state.get("images", [])
 
     if retrieval_mode == "rag":
         # 综合问答：用 ES 检索片段
@@ -270,10 +306,7 @@ def qa_node(state: PaperLensState) -> dict:
             source = "检索片段（全文读取失败降级）"
         prompt = QA_SYSTEM.format(context=context)
 
-    response = llm.invoke([
-        SystemMessage(content=prompt),
-        _build_human_message(last_msg.content, images)
-    ])
+    response = llm.invoke(_build_chat_messages(prompt, state))
     logger.info(f"qa 完成（素材={source}）")
     return {"messages": [response]}
 
@@ -299,12 +332,8 @@ def analyze_node(state: PaperLensState) -> dict:
 
 
 def general_node(state: PaperLensState) -> dict:
-    """一般对话节点"""
-    last_msg = state["messages"][-1]
-    response = llm.invoke([
-        SystemMessage(content=GENERAL_SYSTEM),
-        HumanMessage(content=last_msg.content)
-    ])
+    """一般对话节点（带多轮历史）"""
+    response = llm.invoke(_build_chat_messages(GENERAL_SYSTEM, state))
     return {"messages": [response]}
 
 
@@ -340,17 +369,69 @@ def learn_node(state: PaperLensState) -> dict:
     user_outline = state.get("learn_outline", "") or ""
     paper_ids = state.get("paper_ids", []) or []
 
-    # ── 学习助手一律走全文（用户要求：所有模式优先通读全文再回答）──
-    # 全文优先：context 用磁盘上的完整 Markdown（含图表描述），LLM 能看全。
-    # 检索片段(retrieved_context)仅作文案/日志参考，不再喂给 LLM。
-    # 若全文读取失败（如文档未解析完），降级用检索片段，保证不报错。
+    # ── 素材获取策略：通读全文优先，超限时才降级检索式 ──
+    #
+    # 三级降级（始终优先"看全文"，因为全局视野比片段召回更重要）：
+    #
+    # 1) 全文能塞下当前 LLM 的上下文 → 通读全文（最优，全局视野）
+    #    - thinking 开：全文 ≤ 18 万字（98K token 限制）→ 直接读
+    #    - thinking 关：全文 ≤ 60 万字（1M token 限制）→ 直接读
+    #
+    # 2) 全文超限 + 是 notes/slides 单章生成 → 检索式（用大纲条目检索 ES 片段）
+    #    只有这种情况才牺牲全局视野换"不超限 + 精确相关"。
+    #
+    # 3) 全文超限 + 其他模式（qa/summary/flashcard/quiz/整篇notes）→ 头尾截断全文
+    #    退而求其次：至少看到开头结尾，比纯检索片段视野更全。
+    #
+    # 这样：论文/短课件（几万字）→ 通读全文，质量最好；
+    #       教材/长书（百万字）→ notes 分章节走检索，其他走截断。
     try:
-        context = _load_full_markdown(paper_ids)
-        source_note = "完整资料（MinerU 解析的全文 Markdown，含图表说明）"
+        # 先算全文实际长度（不截断），判断是否超限
+        from app.services.document_service import document_service
+        total_len = 0
+        for pid in paper_ids:
+            try:
+                total_len += len(document_service.get_full_markdown(pid))
+            except Exception:
+                pass
+        # 当前 LLM 的 thinking 状态决定可通读的字符上限
+        thinking_on = bool(settings["llm"].get("enable_thinking", True))
+        fulltext_budget = 180000 if thinking_on else 600000
+
+        is_single_chapter_notes = (
+            mode in ("notes", "slides")
+            and bool(user_outline.strip())
+            and _looks_like_single_chapter(user_outline)
+        )
+
+        if total_len <= fulltext_budget:
+            # ① 全文能塞下 → 通读全文（最优路径）
+            context = _load_full_markdown(paper_ids)
+            source_note = f"完整资料全文通读（{total_len:,} 字 ≤ {fulltext_budget:,} 预算）"
+            logger.info(f"通读全文模式：{total_len:,} 字在预算内，全文喂 LLM")
+        elif is_single_chapter_notes:
+            # ② 超限 + 单章笔记 → 检索式（ES top 片段）
+            from app.core.rag_engine import rag_engine
+            results = rag_engine.retrieve(user_outline, paper_ids, top_k=15)
+            if results:
+                context = "\n\n---\n\n".join(r.content for r in results)
+                source_note = (f"检索片段（全文{total_len:,}字超限，按大纲"
+                               f"「{user_outline[:15]}…」检索 top-{len(results)}）")
+                logger.info(f"检索式降级：全文{total_len:,}字超限，单章走 ES 检索")
+            else:
+                # 检索为空：降级头尾截断全文
+                logger.warning(f"大纲「{user_outline[:20]}」检索为空，降级全文截断")
+                context = _load_full_markdown(paper_ids)
+                source_note = f"完整资料头尾截断（全文{total_len:,}字超限，检索为空）"
+        else:
+            # ③ 超限 + 其他模式 → 头尾截断全文
+            context = _load_full_markdown(paper_ids)
+            source_note = f"完整资料头尾截断（全文{total_len:,}字 > {fulltext_budget:,}预算）"
+            logger.info(f"截断模式：全文{total_len:,}字超限，头尾截断喂 LLM")
     except Exception as e:
-        logger.warning(f"全文读取失败，降级用检索片段（mode={mode}）: {e}")
+        logger.warning(f"素材获取失败，降级用检索片段（mode={mode}）: {e}")
         context = retrieved_context
-        source_note = "检索到的课件片段（全文读取失败，降级）"
+        source_note = "检索到的课件片段（素材获取失败，降级）"
 
     # ── 选 prompt 模板 ──
     prompt_map = {
@@ -384,27 +465,29 @@ def learn_node(state: PaperLensState) -> dict:
         prompt = template.format(context=context)
 
     # summary/flashcard/quiz/notes/slides 是"一键生成"类任务：用户消息作为任务指令补充
-    # qa 模式则是正常问答，且支持用户附带图片（多模态）
+    # qa 模式则是正常问答，支持多轮历史 + 用户附带图片（多模态）
     if mode == "qa":
-        user_content = last_msg.content
-        human_msg = _build_human_message(user_content, images)
+        # 走多轮记忆通路：注入最近 N 轮历史，模型能记得上文
+        response = llm.invoke(_build_chat_messages(prompt, state))
     else:
         user_content = f"请基于上面的【{source_note}】完成此任务。学生原始输入：{last_msg.content}"
         human_msg = HumanMessage(content=user_content)
+        response = llm.invoke([SystemMessage(content=prompt), human_msg])
 
-    response = llm.invoke([
-        SystemMessage(content=prompt),
-        human_msg
-    ])
     logger.info(f"学习助手完成（mode={mode}, 素材={source_note}）")
     return {"messages": [response]}
 
 
-def _load_full_markdown(paper_ids: list, max_chars: int = 600000) -> str:
+def _load_full_markdown(paper_ids: list, max_chars: int = None) -> str:
     """把多篇论文的完整 Markdown 拼成一段全文，供「通读全文」任务使用。
 
-    qwen3.7-plus 上下文 1M tokens（≈中文 180 万字）。这里留出 prompt + 输出空间，
-    默认 max_chars=60万字（≈30万tokens），单篇/少数几篇完全够用。
+    ⚠️ 上下文上限与 thinking 模式强相关：
+    - qwen3.7-plus 非思考模式：1M tokens（≈中文 180 万字）
+    - qwen3.7-plus 思考模式：输入上限骤降为 98304 tokens（≈中文 20 万字）
+
+    因此 max_chars 按当前 thinking 设置自适应：
+    - thinking=True（主力 llm）：默认 18 万字（留余量给 prompt + 输出，确保 < 98K tokens）
+    - thinking=False（fast_llm，如大纲生成）：默认 60 万字（≈30 万 tokens，远小于 1M）
 
     超限处理（一次性选几十篇课件的极端情况）：
     - 不直接报错，而是【按篇均摊截断】：每篇只保留开头 + 结尾各一半，保证每篇都能被看到。
@@ -412,6 +495,13 @@ def _load_full_markdown(paper_ids: list, max_chars: int = 600000) -> str:
 
     单篇直接返回；多篇用分隔标注区分。任何一篇读取失败会跳过并记日志。
     """
+    # 自适应上限：thinking 模式受 98304 token 限制，必须大幅压低字符预算
+    if max_chars is None:
+        thinking = bool(settings["llm"].get("enable_thinking", True))
+        max_chars = 180000 if thinking else 600000
+        if thinking:
+            logger.info(f"thinking 模式开启，全文预算上限 = {max_chars} 字（适配 98K token 输入限制）")
+
     from app.services.document_service import document_service
     docs = []  # [(pid, md)]
     for pid in paper_ids:
@@ -451,6 +541,172 @@ def _load_full_markdown(paper_ids: list, max_chars: int = 600000) -> str:
         parts.append(f"\n\n===== 资料{i}（paper_id={pid}，{len(md)}字）=====\n\n{chunk}")
     header = f"（注意：你选择的 {len(docs)} 篇资料合计超长，以下为每篇节选拼接，详见各篇标记。）\n"
     return header + "".join(parts)
+
+
+# ── 章节感知分批：超长文档的核心 ──
+import re as _re
+
+# 匹配 markdown 标题行：# / ## / ### / ####（1-4 级）
+_HEADING_RE = _re.compile(r"^(#{1,4})\s+(.+?)\s*$", _re.MULTILINE)
+
+
+def _split_by_chapters(markdown: str) -> list:
+    """把 markdown 按【顶级/次级标题】切成 [(标题, 该章节正文), ...]。
+
+    用于章节感知分批：超长文档（如 111 万字的数学书）不能整篇喂给开 thinking 的 LLM
+    （思考模式输入上限 98304 tokens），但按章节切开后，每章通常几万字，远在限制内。
+
+    切分策略：以 `#` 和 `##` 标题作为章节边界（`###`/`####` 视为小节，不切分顶层）。
+    标题前的引导内容（如封面、版权页）归入"前言"。
+    """
+    if not markdown:
+        return []
+    # 找所有 # / ## 标题的位置
+    boundaries = []  # [(start_idx, level, title)]
+    for m in _HEADING_RE.finditer(markdown):
+        level = len(m.group(1))
+        if level <= 2:   # 只在一级/二级标题处切分
+            boundaries.append((m.start(), level, m.group(2).strip()))
+    if not boundaries:
+        # 没有标题结构，返回整体
+        return [("（全文）", markdown)]
+
+    chapters = []
+    # 标题前的内容归入"前言"
+    if boundaries[0][0] > 0:
+        preface = markdown[: boundaries[0][0]].strip()
+        if preface:
+            chapters.append(("（前言/封面）", preface))
+
+    for i, (start, level, title) in enumerate(boundaries):
+        end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(markdown)
+        body = markdown[start:end].strip()
+        if body:
+            chapters.append((title, body))
+    return chapters
+
+
+def _normalize_title(title: str) -> str:
+    """标题归一化：去标点/空格/章节序号，便于模糊匹配大纲条目↔原文章节标题。
+
+    例：「第3章 最小二乘学习法 22」→「最小二乘学习法」
+         「第Ⅱ部分 有监督回归」→「有监督回归」
+         「1. 什么是机器学习」→「什么是机器学习」
+
+    罗马数字用 Unicode 码点范围匹配（U+2160–U+216F 罗马数字、U+2180–U+2182），
+    避免逐个枚举 Ⅰ Ⅱ Ⅲ Ⅳ Ⅴ 容易漏。
+    """
+    t = title
+    # 去页码（标题末尾的纯数字）
+    t = _re.sub(r"\s+\d+\s*$", "", t)
+    # 去"第X部分/章/节"前缀：X 可以是阿拉伯数字、中文数字、罗马数字
+    # 罗马数字范围：Ⅰ-Ⅿ (U+2160-216F) 和 I/V/X/L/C/D/M 的 ASCII 组合
+    t = _re.sub(
+        r"^第[\d一二三四五六七八九十百千\u2160-\u218fIVXLCDMivxlcdm]+(?:部分|篇|章|节)?\s*",
+        "", t,
+    )
+    t = _re.sub(r"^[0-9]+[.、)\s]+", "", t)
+    t = _re.sub(r"^[（(][一二三四五六七八九十0-9]+[)）]\s*", "", t)
+    return t.strip()
+
+
+def _locate_chapter(outline_item: str, paper_ids: list,
+                    max_chars: int = 180000) -> str:
+    """章节感知分批的核心：给定一个大纲条目，定位原文中【最匹配的章节】，
+    返回该章节的原文（截断到 max_chars 内）。
+
+    流程：
+    1. 读全文 → _split_by_chapters 切成 [(标题, 正文)]
+    2. 大纲条目与每个章节标题做【归一化后子串匹配】，找最佳匹配
+    3. 返回该章节正文（超 max_chars 则头尾截断）
+    4. 找不到匹配 → 返回全文的头尾截断（兜底，保证不报错）
+
+    这是"保留 thinking 质量 + 覆盖全书 + 不超 98K"三者兼得的方案：
+    每章独立喂给开 thinking 的 LLM，章节是语义单元，笔记连贯。
+    """
+    from app.services.document_service import document_service
+
+    # 1. 拼全文（多篇时合并）
+    full_texts = []
+    for pid in paper_ids:
+        try:
+            full_texts.append(document_service.get_full_markdown(pid))
+        except Exception as e:
+            logger.warning(f"读取论文 {pid} 全文失败，跳过: {e}")
+    if not full_texts:
+        return "（未能读取全文）"
+    full = "\n\n".join(full_texts)
+
+    # 2. 切章节
+    chapters = _split_by_chapters(full)
+    if len(chapters) <= 1:
+        # 没有章节结构，兜底返回全文头尾截断
+        logger.info(f"无章节结构，大纲条目「{outline_item[:20]}」走全文截断兜底")
+        return _truncate_head_tail(full, max_chars)
+
+    # 3. 大纲条目归一化
+    query = _normalize_title(outline_item)
+    # 去掉大纲条目里的序号和 bullet
+    query = _re.sub(r"^\s*[-•]?\s*[0-9]+[.、)]?\s*", "", query).strip()
+    if not query:
+        query = outline_item.strip()
+
+    # 4. 匹配：归一化后的章节标题里【包含】大纲条目（双向子串匹配）
+    best_idx = -1
+    best_score = 0
+    for idx, (title, body) in enumerate(chapters):
+        norm_title = _normalize_title(title)
+        if not norm_title:
+            continue
+        # 双向子串匹配：query 含 norm_title 或 norm_title 含 query
+        if query in norm_title or norm_title in query:
+            # 长度越接近的章节优先（避免"学习"匹配到太泛的标题）
+            score = min(len(query), len(norm_title)) / max(len(query), len(norm_title), 1)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+    if best_idx < 0:
+        logger.info(f"大纲条目「{query[:20]}」未匹配到章节，走全文截断兜底")
+        return _truncate_head_tail(full, max_chars)
+
+    title, body = chapters[best_idx]
+    logger.info(f"大纲「{query[:20]}」匹配到章节「{title}」（{len(body)} 字）")
+    # 5. 该章节正文超 max_chars 时头尾截断
+    if len(body) > max_chars:
+        body = _truncate_head_tail(body, max_chars)
+        body = f"（本章原文 {len(chapters[best_idx][1])} 字，超长已截断保留头尾）\n\n{body}"
+    return body
+
+
+def _truncate_head_tail(text: str, max_chars: int) -> str:
+    """头尾各保留一半，中间用省略标记。"""
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return (
+        text[:half]
+        + f"\n\n……（原文 {len(text)} 字，此处仅保留开头与结尾）……\n\n"
+        + text[-half:]
+    )
+
+
+def _looks_like_single_chapter(outline: str) -> bool:
+    """判断 outline 是【单章标题】还是【完整多章大纲】。
+
+    分章节模式逐章生成时，前端每次传单章标题（如"最小二乘学习法"）；
+    整篇模式传完整大纲（多行，每行一章）。只有单章才走 _locate_chapter。
+
+    判断：行数 <= 3 且每行都很短（< 60 字）→ 当作单章标题。
+    """
+    lines = [l.strip() for l in outline.split("\n") if l.strip()]
+    if not lines:
+        return False
+    # 多行大纲（>=4 行）一定不是单章
+    if len(lines) >= 4:
+        return False
+    # 单章标题通常很短；若任何一行超 80 字，更像段落描述而非标题
+    return all(len(l) < 80 for l in lines)
 
 
 # ──────────────────────────────────────────────

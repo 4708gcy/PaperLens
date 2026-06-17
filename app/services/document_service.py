@@ -40,6 +40,46 @@ else:
     )
 
 
+def _clean_markdown(text: str) -> str:
+    """轻量排版清洗：让 MinerU 输出的 markdown 对 LLM 更友好。
+
+    处理三类常见噪声（都是 MinerU 抽取扫描/排版文档时的典型产物）：
+    1. 被错误断行的句子：行尾不是句末标点，下一行也不是列表/标题开头 → 拼回一行。
+       （PDF 换行≠语义换行，硬换行会把一个句子切成多行，影响检索和阅读。）
+    2. 3+ 连续空行压成 2 个。
+    3. 独占一行的纯数字（常见页码）。
+
+    刻意保守：不动 markdown 语法（#、-、*、`、表格 |）、不动图片、不动 HTML 注释。
+    """
+    import re
+
+    # 1. 合并错误断行：行尾不是 句末标点/列表符/数字/反引号/竖线，
+    #    且下一行首不是 标题#/列表-/数字编号/表格|/引用>/反引号`/空白(缩进代码块)，
+    #    且【当前行不是标题行/列表行/代码围栏行】（用回调查 start 所在行首字符）。
+    #    用回调避免 (?m)(?<!^) 在不同 regex 引用下行为不一致的问题。
+    _line_start_chars = "#-*>"   # 这些字符开头的行是结构行，不参与合并
+
+    def _merge(m):
+        start = m.start()
+        # 找 start 所在行的行首
+        line_head = text.rfind("\n", 0, start) + 1
+        first = text[line_head] if line_head < len(text) else ""
+        if first in _line_start_chars:
+            return m.group(0)   # 当前是结构行，保持原样不合并
+        return m.group(1) + " " + m.group(2)   # 把行尾字符、空格、下一行首字符拼回
+
+    text = re.sub(
+        r'([^\n。？！：；”"’、•\-\d`|])\n([ \t]*[^\n•\-\d#`|>\s])',
+        _merge,
+        text,
+    )
+    # 2. 压缩 3+ 连续空行为 2 个
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # 3. 去页码（独占一行的 1-4 位纯数字）
+    text = re.sub(r'\n\s*\d{1,4}\s*\n', '\n', text)
+    return text
+
+
 class DocumentService:
     """文档处理服务"""
 
@@ -47,12 +87,30 @@ class DocumentService:
     SUPPORTED_EXTENSIONS = {".pdf"} | SUPPORTED_NON_PDF | {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
     def process_document(self, file_path: str, paper_id: int,
-                         title: str = "") -> Dict:
+                         title: str = "", force_pdf: bool = True,
+                         image_mode: str = None) -> Dict:
         """
         处理一个文档：转换 → 拆分 → MinerU → 合并 → 分块 → 索引
 
         返回: {"markdown_path", "total_chunks", "indexed", "page_count"}
+
+        force_pdf（格式路由参数）：
+        - True（默认）：非 PDF 先用 LibreOffice 转 PDF 再交给 MinerU。MinerU 对 PDF 解析最稳。
+        - False：DOCX/PPTX 直接给 MinerU（MinerU 原生支持），跳过 LibreOffice。
+          适用于"图片少、文本层完整"的可编辑 Word/PPT —— 省一次转换、有时质量更好。
+
+        image_mode（图片理解开关，二态）：
+        - "on"：处理全部图片（无上限）。论文/报告适用——架构图/实验图有价值，描述补进全文+ES。
+        - "off"：完全跳过图片理解。教材/数学书适用——公式截图描述无意义，省 30+ 分钟。
+        - None：用 config.yaml 的 document.image_mode 默认值。
         """
+        # 解析 image_mode：None 时回落到 config 默认
+        if image_mode is None:
+            image_mode = settings.get("document", {}).get("image_mode", "on")
+        image_mode = (image_mode or "on").lower()
+        if image_mode not in ("on", "off"):
+            image_mode = "on"
+        logger.info(f"图片理解模式: {image_mode}")
         input_path = Path(file_path)
         papers_dir = Path(settings["document"]["papers_dir"])
         paper_dir = papers_dir / str(paper_id)
@@ -62,21 +120,39 @@ class DocumentService:
         split_parts_to_clean = []     # 记录 pypdf 拆分出的临时子 PDF（结束清理）
 
         try:
-            # ── Step 1: 非 PDF → PDF（LibreOffice）──
+            # ── Step 1: 格式路由（force_pdf 决定是否转 PDF）──
+            # - PDF 输入：直接用（force_pdf 对 PDF 无意义）
+            # - 非 PDF + force_pdf=True：LibreOffice 转 PDF（旧行为，最稳）
+            # - 非 PDF + force_pdf=False：原格式直接给 MinerU（图片少的 Word/PPT 更优）
             if is_pdf(file_path):
                 pdf_path = file_path
-                logger.info(f"输入是 PDF，跳过格式转换: {input_path.name}")
-            else:
-                logger.info(f"非 PDF 格式（{input_path.suffix}），用 LibreOffice 转 PDF...")
+                mineru_input = file_path        # MinerU 直接吃原 PDF
+                page_count = get_pdf_page_count(pdf_path)
+                logger.info(f"输入是 PDF（{page_count} 页），跳过格式转换: {input_path.name}")
+            elif force_pdf:
+                logger.info(f"非 PDF（{input_path.suffix}），按 force_pdf 用 LibreOffice 转 PDF...")
                 pdf_path = convert_to_pdf(file_path, output_dir=str(paper_dir))
                 converted_pdf_to_clean = pdf_path
+                mineru_input = pdf_path
+                page_count = get_pdf_page_count(pdf_path)
+            else:
+                # 原格式直解：不转 PDF，MinerU 直接吃 DOCX/PPTX
+                logger.info(f"非 PDF（{input_path.suffix}），force_pdf=False，原格式直解 MinerU")
+                pdf_path = None
+                mineru_input = file_path
+                # 页数用 PDF 的概念不适用，记 0（DOCX 无固定页数）
+                page_count = 0
 
-            # ── Step 2: PDF 拆分（>200 页）──
-            page_count = get_pdf_page_count(pdf_path)
-            sub_files = split_pdf(pdf_path, max_pages=settings["document"]["max_pdf_pages"])
-            # 拆分产物（sub_files 里除原始 pdf_path 外的都是临时文件，结束后清理）
-            split_parts_to_clean = [p for p in sub_files if p != pdf_path]
-            logger.info(f"PDF {input_path.name}（{page_count} 页）→ {len(sub_files)} 份")
+            # ── Step 2: PDF 拆分（>200 页）—— 仅 PDF 走这步 ──
+            if pdf_path is not None:
+                sub_files = split_pdf(pdf_path, max_pages=settings["document"]["max_pdf_pages"])
+                # 拆分产物（sub_files 里除原始 pdf_path 外的都是临时文件，结束后清理）
+                split_parts_to_clean = [p for p in sub_files if p != pdf_path]
+                logger.info(f"PDF {input_path.name}（{page_count} 页）→ {len(sub_files)} 份")
+            else:
+                # 原格式直解：MinerU 自己处理整文件（DOCX/PPTX 无 200 页限制）
+                sub_files = [mineru_input]
+                logger.info(f"原格式直解: {input_path.name}（DOCX/PPTX 不拆分）")
 
             # ── Step 3: mineru-open-api extract 转 Markdown ──
             md_files: List[Path] = []
@@ -101,23 +177,60 @@ class DocumentService:
             # 顺序调整：先理解图片，再把【图片描述补进 markdown】，
             # 这样保存的 .md 和全文任务(笔记/PPT/summary)都能看到图片内容，
             # 不再只靠 ES 里的 image_caption 片段。
+            #
+            # 二态开关（image_mode），不再按数量截断：
+            # - on  ：处理【全部】图片（论文/报告，架构图/实验图有价值）
+            # - off ：完全跳过（教材/数学书，公式截图描述无意义，省 30+ 分钟）
+            # 为什么不做"上限截断"：前 N 张可能恰好是最不相关的，截断只增噪声不提质。
             image_captions = []
-            try:
-                from app.core.multimodal import multimodal_manager
-                mineru_dirs = list(paper_dir.glob("mineru_*"))
-                # 上限从 config 读，默认 30（覆盖多数文档的图表）
-                max_images = settings.get("document", {}).get("max_images_per_dir", 30)
-                for md_dir in mineru_dirs:
-                    images_subdir = md_dir / "images"
-                    if images_subdir.exists():
-                        image_captions.extend(
-                            multimodal_manager.describe_paper_images(
-                                str(images_subdir), max_images=max_images
-                            )
-                        )
-                logger.info(f"图片理解完成: {len(image_captions)} 张")
-            except Exception as e:
-                logger.warning(f"图片理解失败（不影响主流程）: {e}")
+            if image_mode == "off":
+                logger.info("图片理解已关闭（image_mode=off），跳过")
+            else:
+                try:
+                    from app.core.multimodal import multimodal_manager
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    # 收集所有 mineru_* 目录下的全部图片（不截断）
+                    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+                    all_images = []
+                    for md_dir in sorted(paper_dir.glob("mineru_*")):
+                        images_subdir = md_dir / "images"
+                        if images_subdir.exists():
+                            all_images.extend(sorted(
+                                p for p in images_subdir.rglob("*")
+                                if p.suffix.lower() in image_exts
+                            ))
+                    logger.info(
+                        f"待理解图片: {len(all_images)} 张（全开模式，5 并发，"
+                        f"预计 {len(all_images) * 33 // 5 // 60 + 1} 分钟）"
+                    )
+                    if all_images:
+                        with ThreadPoolExecutor(max_workers=5) as ex:
+                            fut_to_img = {
+                                ex.submit(multimodal_manager.understand_image, str(p)): p
+                                for p in all_images
+                            }
+                            done = 0
+                            total = len(fut_to_img)
+                            for fut in as_completed(fut_to_img):
+                                img = fut_to_img[fut]
+                                done += 1
+                                try:
+                                    desc = fut.result()
+                                    if desc:
+                                        image_captions.append({
+                                            "image_path": str(img),
+                                            "description": desc
+                                        })
+                                    if done % 5 == 0 or done == total:
+                                        logger.info(f"图片理解进度: {done}/{total}")
+                                except Exception as e:
+                                    logger.warning(f"图片理解失败 {img.name}: {e}")
+                        # 稳定排序
+                        order = {str(p): i for i, p in enumerate(all_images)}
+                        image_captions.sort(key=lambda r: order.get(r["image_path"], 0))
+                    logger.info(f"图片理解完成: {len(image_captions)} 张")
+                except Exception as e:
+                    logger.warning(f"图片理解失败（不影响主流程）: {e}")
 
             # ── Step 5.5: 把图片描述补进 markdown ──
             # 以「图表说明」区块附在正文末尾，LLM 读全文时能理解图表含义。
@@ -131,9 +244,33 @@ class DocumentService:
                 markdown_content = markdown_content.rstrip() + "\n" + "\n".join(caption_lines)
                 logger.info(f"已将 {len(image_captions)} 条图片描述补入 markdown")
 
+            # ── Step 5.6: 排版清洗（让 markdown 对 LLM 更友好）──
+            # MinerU 输出常带：被错误断行的句子、连续空行、纯数字页码行等。
+            # 这些对检索和通读都是噪声，清洗后显著提升 LLM 可读性。
+            # 注意：清洗在【补图片描述之后】，避免破坏图片块；只改正文排版。
+            before_len = len(markdown_content)
+            markdown_content = _clean_markdown(markdown_content)
+            logger.info(f"排版清洗: {before_len} → {len(markdown_content)} 字符")
+
             # ── Step 6: 保存合并后的 Markdown（含图片描述）──
             merged_md_path = paper_dir / f"{input_path.stem}.md"
             merged_md_path.write_text(markdown_content, encoding="utf-8")
+
+            # ── Step 6.5: 清理中间 part md（保留 images 目录）──
+            # 合并 md 已包含全部正文 + 图片描述，AI 只读顶层 md（get_full_markdown
+            # 用 glob("*.md") 非递归，本就不会读子目录）。中间 part md 是冗余的，
+            # 删除可省空间、避免困惑。但 images/ 必须保留——合并 md 里的
+            # ![](mineru_xxx/images/...) 依赖它渲染。
+            cleaned_md = 0
+            for md_dir in paper_dir.glob("mineru_*"):
+                for part_md in md_dir.glob("*.md"):
+                    try:
+                        part_md.unlink()
+                        cleaned_md += 1
+                    except Exception as e:
+                        logger.warning(f"删除中间文件失败 {part_md}: {e}")
+            if cleaned_md:
+                logger.info(f"已清理 {cleaned_md} 个中间 part md（images 目录已保留）")
 
             # ── Step 7: 分块（文本 + 图片描述独立 chunk）──
             chunk_size = settings["elasticsearch"]["chunk_size"]
