@@ -232,17 +232,24 @@ class DocumentService:
                 except Exception as e:
                     logger.warning(f"图片理解失败（不影响主流程）: {e}")
 
-            # ── Step 5.5: 把图片描述补进 markdown ──
-            # 以「图表说明」区块附在正文末尾，LLM 读全文时能理解图表含义。
-            # （不插入到原 `![]()` 位置，因为定位困难且可能打乱版面。）
+            # ── Step 5.5: 图片描述存为【独立文件】，不污染正文 ──
+            # 【重要变更】原来把图片描述 append 到正文末尾，导致超长文档（如 111 万字
+            # 数学书）的后 70% 全是英文图片描述块，严重污染正文语义、割裂结构。
+            # 现在改为：正文 markdown 保持纯净（只有 MinerU 原始解析 + 排版清洗），
+            # 图片描述单独存 {stem}_images.md，LLM 读全文时看到的是干净正文。
+            # 图片描述仍会作为独立 chunk 进 ES（Step 7），检索能力不丢。
             if image_captions:
-                caption_lines = ["", "<!-- ===== 图表说明（qwen3.7-plus 视觉理解生成）===== -->", ""]
+                caption_lines = [
+                    f"# {input_path.stem} - 图表说明\n",
+                    "> 以下由 qwen3.7-plus 视觉理解生成，供检索参考。\n",
+                ]
                 for ic in image_captions:
                     img_name = Path(ic["image_path"]).name
-                    caption_lines.append(f"**📊 {img_name}**：{ic['description']}")
-                    caption_lines.append("")
-                markdown_content = markdown_content.rstrip() + "\n" + "\n".join(caption_lines)
-                logger.info(f"已将 {len(image_captions)} 条图片描述补入 markdown")
+                    # 用 [图] 文字标记代替 emoji 📊（emoji 在部分终端/编码下乱码成 ??）
+                    caption_lines.append(f"**[图] {img_name}**：{ic['description']}\n")
+                images_md_path = paper_dir / f"{input_path.stem}_images.md"
+                images_md_path.write_text("\n".join(caption_lines), encoding="utf-8")
+                logger.info(f"图片描述存为独立文件: {images_md_path.name}（{len(image_captions)} 条，不污染正文）")
 
             # ── Step 5.6: 排版清洗（让 markdown 对 LLM 更友好）──
             # MinerU 输出常带：被错误断行的句子、连续空行、纯数字页码行等。
@@ -252,15 +259,14 @@ class DocumentService:
             markdown_content = _clean_markdown(markdown_content)
             logger.info(f"排版清洗: {before_len} → {len(markdown_content)} 字符")
 
-            # ── Step 6: 保存合并后的 Markdown（含图片描述）──
+            # ── Step 6: 保存纯净正文 Markdown（不含图片描述，描述在 _images.md）──
             merged_md_path = paper_dir / f"{input_path.stem}.md"
             merged_md_path.write_text(markdown_content, encoding="utf-8")
 
-            # ── Step 6.5: 清理中间 part md（保留 images 目录）──
-            # 合并 md 已包含全部正文 + 图片描述，AI 只读顶层 md（get_full_markdown
-            # 用 glob("*.md") 非递归，本就不会读子目录）。中间 part md 是冗余的，
-            # 删除可省空间、避免困惑。但 images/ 必须保留——合并 md 里的
-            # ![](mineru_xxx/images/...) 依赖它渲染。
+            # ── Step 6.5: 清理中间 part md（保留 images 目录 + _images.md）──
+            # 正文 md（{stem}.md）+ 图片描述 md（{stem}_images.md）都在顶层，
+            # get_full_markdown 只读 {stem}.md（取排序后第一个，正文先于 _images）。
+            # mineru_* 子目录里的 part md 是冗余的，删除省空间。images/ 必须保留。
             cleaned_md = 0
             for md_dir in paper_dir.glob("mineru_*"):
                 for part_md in md_dir.glob("*.md"):
@@ -475,11 +481,15 @@ class DocumentService:
             raise DocumentProcessError(
                 f"论文目录不存在: {paper_dir}（paper_id={paper_id} 可能尚未解析完成）"
             )
-        # 取该 paper_id 下第一个 .md（就是 process_document 存的合并 md）
-        md_files = sorted(paper_dir.glob("*.md"))
+        # 取正文 .md：排除 _images.md（图片描述独立文件，不喂给全文通读任务）
+        # 否则 LLM 读全文会看到一堆英文图片描述，污染正文语义
+        md_files = sorted(
+            f for f in paper_dir.glob("*.md")
+            if not f.name.endswith("_images.md")
+        )
         if not md_files:
             raise DocumentProcessError(
-                f"论文 {paper_id} 目录下没有 Markdown 文件: {paper_dir}"
+                f"论文 {paper_id} 目录下没有正文 Markdown 文件: {paper_dir}"
             )
         return md_files[0].read_text(encoding="utf-8")
 
