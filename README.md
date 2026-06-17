@@ -7,6 +7,12 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-1.2-orange)
 ![Elasticsearch](https://img.shields.io/badge/ES-9.3-yellow)
 
+## 🎬 演示视频
+
+> 完整功能演示（论文精读 / 结构化解读 / 多篇综述 / 学习助手 6 模式 / 综合问答 / 多格式上传 + 智能格式路由）
+
+**▶ 点击观看**：[PaperLens — 论文与课件学习智能体演示](https://www.bilibili.com/video/BV1U7LR6VEVz/)
+
 ## ✨ 核心功能
 
 ### 📖 论文精读（ES 检索通路）
